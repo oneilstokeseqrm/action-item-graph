@@ -1,0 +1,104 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "EnvelopeV1",
+  "description": "Standardized event envelope for all ecosystem events (Version 1). This schema matches the EnvelopeV1 Pydantic model from the source service.",
+  "type": "object",
+  "required": [
+    "tenant_id",
+    "user_id",
+    "interaction_type",
+    "content",
+    "timestamp",
+    "source"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "default": "v1",
+      "description": "Event schema version"
+    },
+    "tenant_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Tenant/organization UUID (REQUIRED)"
+    },
+    "user_id": {
+      "type": "string",
+      "description": "User identifier (supports Auth0 IDs, type-prefixed IDs) (REQUIRED)"
+    },
+    "interaction_type": {
+      "type": "string",
+      "enum": ["transcript", "note", "document"],
+      "description": "Type of interaction (REQUIRED)"
+    },
+    "content": {
+      "type": "object",
+      "description": "The actual content payload (REQUIRED)",
+      "required": ["text"],
+      "properties": {
+        "text": {
+          "type": "string",
+          "description": "The actual content text"
+        },
+        "format": {
+          "type": "string",
+          "enum": ["plain", "markdown", "diarized"],
+          "default": "plain",
+          "description": "Content format"
+        }
+      }
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Event creation timestamp (UTC, ISO 8601) (REQUIRED)"
+    },
+    "source": {
+      "type": "string",
+      "enum": ["web-mic", "upload", "api", "import"],
+      "description": "Origin of content (REQUIRED)"
+    },
+    "extras": {
+      "type": "object",
+      "additionalProperties": true,
+      "default": {},
+      "description": "Flexible metadata for domain-specific extensions. Can include: opportunity_id, contact_ids, deal_stage, etc."
+    },
+    "interaction_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier for this interaction (optional, will be generated if not provided)"
+    },
+    "trace_id": {
+      "type": "string",
+      "description": "Distributed tracing identifier (optional)"
+    },
+    "account_id": {
+      "type": "string",
+      "description": "Account identifier for CRM/sales context (optional but recommended for action item graph)"
+    }
+  },
+  "examples": [
+    {
+      "schema_version": "v1",
+      "tenant_id": "550e8400-e29b-41d4-a716-446655440000",
+      "user_id": "auth0|abc123def456",
+      "interaction_type": "transcript",
+      "content": {
+        "text": "John: Thanks for joining the call today. We need to discuss the proposal timeline.\nSarah: Agreed. I'll send over the updated deck by Friday.\nJohn: Perfect. And I'll schedule the follow-up demo with the technical team for next week.\nSarah: Sounds good. Also, we should loop in legal to review the contract terms.\nJohn: I'll reach out to them today.",
+        "format": "diarized"
+      },
+      "timestamp": "2025-01-23T10:30:00Z",
+      "source": "web-mic",
+      "extras": {
+        "opportunity_id": "opp_deal_456",
+        "contact_ids": ["contact_sarah_001", "contact_john_002"],
+        "meeting_title": "Q1 Proposal Review",
+        "duration_seconds": 1800
+      },
+      "interaction_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+      "trace_id": "trace-abc-123-xyz",
+      "account_id": "acct_acme_corp_001"
+    }
+  ]
+}
