@@ -45,26 +45,37 @@ cp .env.example .env
 Create a `.env` file with:
 
 ```bash
-# Required
+# Required — OpenAI
 OPENAI_API_KEY=sk-...
+
+# Required — AI Database (Action Items, Topics, Owners)
 NEO4J_URI=neo4j+s://xxxxx.databases.neo4j.io
 NEO4J_PASSWORD=your-password
 
-# Optional
-NEO4J_USER=neo4j  # defaults to 'neo4j'
-OPENAI_MODEL=gpt-4.1-mini  # defaults to gpt-4.1-mini
-EMBEDDING_MODEL=text-embedding-3-small  # defaults to text-embedding-3-small
-LOG_LEVEL=INFO  # DEBUG, INFO, WARNING, ERROR
-LOG_FORMAT=json  # json or console
-
-# Deal Graph (connects to existing neo4j_structured instance)
-DEAL_NEO4J_URI=neo4j+s://xxxxx.databases.neo4j.io
+# Required — Deal Database (Deals, DealVersions) — SEPARATE Neo4j instance
+DEAL_NEO4J_URI=neo4j+s://yyyyy.databases.neo4j.io
 DEAL_NEO4J_PASSWORD=your-deal-password
-# DEAL_NEO4J_USERNAME=neo4j      # defaults to 'neo4j'
-# DEAL_NEO4J_DATABASE=neo4j      # defaults to 'neo4j'
-# DEAL_SIMILARITY_THRESHOLD=0.70 # Vector match threshold
-# DEAL_AUTO_MATCH_THRESHOLD=0.90 # Auto-match (skip LLM) threshold
+
+# Optional — AI DB
+# NEO4J_USERNAME=neo4j                   # defaults to 'neo4j'
+# NEO4J_DATABASE=neo4j                   # defaults to 'neo4j'
+
+# Optional — Deal DB
+# DEAL_NEO4J_USERNAME=neo4j              # defaults to 'neo4j'
+# DEAL_NEO4J_DATABASE=neo4j              # defaults to 'neo4j'
+# DEAL_SIMILARITY_THRESHOLD=0.70         # Vector match threshold
+# DEAL_AUTO_MATCH_THRESHOLD=0.90         # Auto-match (skip LLM) threshold
+
+# Optional — General
+# OPENAI_MODEL=gpt-4.1-mini             # defaults to gpt-4.1-mini
+# EMBEDDING_MODEL=text-embedding-3-small # defaults to text-embedding-3-small
+# LOG_LEVEL=INFO                         # DEBUG, INFO, WARNING, ERROR
+# LOG_FORMAT=json                        # json or console
 ```
+
+> **Important**: `NEO4J_*` and `DEAL_NEO4J_*` point to **two separate Neo4j Aura
+> instances**. The AI pipeline and Deal pipeline never share a database, driver, or
+> schema. See [Dual Database Architecture](#dual-database-architecture) below.
 
 ## Quick Start
 
@@ -142,6 +153,76 @@ envelope = EnvelopeV1(
 
 result = await pipeline.process_envelope(envelope)
 ```
+
+### Using the Dual-Pipeline Dispatcher (Recommended)
+
+For production use, the `EnvelopeDispatcher` routes each envelope to both the
+Action Item and Deal pipelines concurrently:
+
+```python
+import asyncio
+from uuid import UUID
+from datetime import datetime, timezone
+from action_item_graph.models import EnvelopeV1
+from dispatcher import EnvelopeDispatcher
+
+async def main():
+    dispatcher = EnvelopeDispatcher.from_env()
+
+    envelope = EnvelopeV1(
+        tenant_id=UUID("11111111-1111-4111-8111-111111111111"),
+        user_id="user_123",
+        interaction_type="transcript",
+        content={"text": "Your transcript here...", "format": "plain"},
+        timestamp=datetime.now(timezone.utc),
+        source="api",
+        account_id="acct_acme_corp",
+    )
+
+    result = await dispatcher.dispatch(envelope)
+
+    if result.action_item_success:
+        print(f"Action items: {result.action_item_result.total_extracted}")
+    if result.deal_success:
+        print(f"Deals extracted: {result.deal_result.total_extracted}")
+    print(f"Both succeeded: {result.both_succeeded}")
+
+    await dispatcher.close()
+
+asyncio.run(main())
+```
+
+The dispatcher uses `asyncio.gather(return_exceptions=True)` — one pipeline failing
+never blocks the other. See [docs/DEAL_SERVICE_ARCHITECTURE.md](./docs/DEAL_SERVICE_ARCHITECTURE.md)
+for full architecture details.
+
+## Dual Database Architecture
+
+This system uses **two separate Neo4j Aura instances** with strict isolation:
+
+```
+┌─────────────────────┐    ┌─────────────────────┐
+│   AI Database        │    │   Deal Database      │
+│   (NEO4J_*)          │    │   (DEAL_NEO4J_*)     │
+├─────────────────────┤    ├─────────────────────┤
+│ Account              │    │ Deal                 │
+│ Interaction          │    │ DealVersion          │
+│ ActionItem           │    │ Interaction          │
+│ ActionItemVersion    │    │ Account              │
+│ Owner                │    │                      │
+│ Topic                │    │                      │
+│ TopicVersion         │    │                      │
+├─────────────────────┤    ├─────────────────────┤
+│ Client: Neo4jClient  │    │ Client: DealNeo4jClient │
+│ Constraints: NODE KEY│    │ Constraints: UNIQUE  │
+│ Vector: 4 indexes    │    │ Vector: 2 indexes    │
+└─────────────────────┘    └─────────────────────┘
+```
+
+- **`Neo4jClient`** manages the AI DB schema (tenant-scoped NODE KEY constraints on 7 labels)
+- **`DealNeo4jClient`** manages the Deal DB schema (uniqueness constraints, vector indexes)
+- They share no data, connections, or driver instances
+- Both pipelines run concurrently via `EnvelopeDispatcher` with fault isolation
 
 ## Architecture
 
@@ -225,17 +306,30 @@ Both indexes are searched during matching to find candidates.
 
 ## Testing
 
-### Run All Tests
+### Run All Unit Tests
 
 ```bash
-# Run full test suite
+# Full test suite (all pipelines)
 pytest tests/ -v
 
-# Run specific test file
-pytest tests/test_pipeline.py -v
+# With coverage for both packages
+pytest tests/ --cov=src/action_item_graph --cov=src/deal_graph
+```
 
-# Run with coverage
-pytest tests/ --cov=src/action_item_graph
+### Run Pipeline-Specific Tests
+
+```bash
+# Action Item pipeline only
+pytest tests/test_pipeline.py tests/test_extractor.py tests/test_matcher.py tests/test_merger.py -v
+
+# Deal pipeline only
+pytest tests/test_deal_extraction.py tests/test_deal_matcher.py tests/test_deal_merger.py tests/test_deal_pipeline.py -v
+
+# Dispatcher (routes to both pipelines)
+pytest tests/test_dispatcher.py -v
+
+# Duplicate-text regression tests
+pytest tests/test_duplicate_text.py -v
 ```
 
 ### Test with Real Transcripts
@@ -248,12 +342,6 @@ python examples/run_transcript_tests.py
 
 # Verbose output with merge details
 python examples/run_transcript_tests.py --verbose
-
-# Process specific sequences only
-python examples/run_transcript_tests.py --sequences 1 2
-
-# Dry run (validate JSON only)
-python examples/run_transcript_tests.py --dry-run
 ```
 
 See [examples/transcripts/README.md](./examples/transcripts/README.md) for transcript testing documentation.
@@ -261,13 +349,14 @@ See [examples/transcripts/README.md](./examples/transcripts/README.md) for trans
 ### Live E2E Smoke Test (Dual-Pipeline)
 
 ```bash
-# Requires both NEO4J_* and DEAL_NEO4J_* credentials in .env
+# Requires BOTH NEO4J_* AND DEAL_NEO4J_* credentials in .env
 python scripts/run_live_e2e.py
 ```
 
 Runs all 4 transcripts through the full `EnvelopeDispatcher`, exercising both the
-Action Item and Deal pipelines concurrently. See [docs/LIVE_E2E_TEST_RESULTS.md](./docs/LIVE_E2E_TEST_RESULTS.md)
-for the latest validated run results.
+Action Item and Deal pipelines concurrently against live Neo4j Aura instances. See
+[docs/LIVE_E2E_TEST_RESULTS.md](./docs/LIVE_E2E_TEST_RESULTS.md) for the latest
+validated run results.
 
 ## API Reference
 
@@ -378,21 +467,27 @@ action-item-graph/
 │       ├── topic_executor.py # Topic creation/linking
 │       └── pipeline.py       # Main orchestrator
 ├── tests/
-│   ├── test_pipeline.py      # End-to-end tests
-│   ├── test_extractor.py     # Extraction tests
-│   ├── test_matcher.py       # Matching tests
-│   ├── test_topic_resolver.py # Topic resolution tests
-│   ├── test_topic_executor.py # Topic execution tests
-│   └── ...
+│   ├── test_pipeline.py           # AI pipeline end-to-end
+│   ├── test_deal_pipeline.py      # Deal pipeline end-to-end
+│   ├── test_deal_extraction.py    # MEDDIC extraction
+│   ├── test_deal_matcher.py       # Deal entity resolution
+│   ├── test_deal_merger.py        # Deal merge synthesis
+│   ├── test_dispatcher.py         # Dual-pipeline dispatch
+│   ├── test_duplicate_text.py     # Duplicate-text regression
+│   ├── test_uuid7.py              # UUIDv7 identity tests
+│   └── ...                        # 22 test files total
 ├── examples/
 │   ├── process_transcript.py # Basic usage example
 │   ├── run_transcript_tests.py # Transcript test runner
 │   └── transcripts/          # Real transcript testing
-├── src/deal_graph/              # Deal extraction pipeline
-│   ├── pipeline/                # DealExtractor, DealMatcher, DealMerger
-│   ├── clients/                 # DealNeo4jClient (vector search, schema)
-│   ├── models/                  # ExtractedDeal, MergedDeal
-│   └── repository.py           # DealRepository (graph CRUD)
+├── src/deal_graph/              # Deal extraction pipeline (→ Deal DB)
+│   ├── utils.py                 # uuid7() wrapper (UUIDv7 via fastuuid)
+│   ├── config.py                # DEAL_NEO4J_* env vars, thresholds
+│   ├── repository.py            # DealRepository (graph CRUD)
+│   ├── pipeline/                # DealExtractor, DealMatcher, DealMerger, DealPipeline
+│   ├── clients/                 # DealNeo4jClient (schema, vector search)
+│   ├── models/                  # Deal, DealVersion, ExtractedDeal, MergedDeal
+│   └── prompts/                 # MEDDIC extraction, dedup, merge prompts
 ├── src/dispatcher/              # Dual-pipeline envelope dispatcher
 │   └── dispatcher.py            # EnvelopeDispatcher, DispatcherResult
 ├── scripts/

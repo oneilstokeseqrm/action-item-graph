@@ -2,8 +2,14 @@
 
 > **Version**: 3.0
 > **Date**: 2026-01-31
-> **Status**: Approved — strict contract for coding phase (aligned with eq-structured-graph-core schema authority)
-> **Scope**: New parallel pipeline for extracting Sales Opportunities (Deals) from transcripts using the MEDDIC qualification methodology
+> **Status**: **Implementation complete** (2026-02-03). All phases shipped in PR #1.
+> **Scope**: Parallel pipeline for extracting Sales Opportunities (Deals) from transcripts using the MEDDIC qualification methodology
+>
+> **Reading guide**: This document was written as a design contract *before*
+> implementation. It is preserved as architectural reference. Sections that describe
+> design decisions, trade-offs, and rationale remain accurate. File paths and phase
+> status have been updated to match the shipped codebase. For a concise runtime
+> overview, see [`DEAL_SERVICE_ARCHITECTURE.md`](./DEAL_SERVICE_ARCHITECTURE.md).
 
 ---
 
@@ -195,7 +201,7 @@ src/
 │
 └── dispatcher/                 # NEW — Thin orchestration layer
     ├── __init__.py
-    └── envelope_dispatcher.py  # EnvelopeDispatcher, DispatchResult
+    └── dispatcher.py  # EnvelopeDispatcher, DispatchResult
 ```
 
 ### New Test Files
@@ -208,7 +214,7 @@ tests/
 ├── test_deal_pipeline.py         # End-to-end deal pipeline
 ├── test_deal_repository.py       # Graph CRUD operations
 ├── test_deal_neo4j_client.py     # Schema setup, vector search
-└── test_envelope_dispatcher.py   # Parallel processing
+└── test_dispatcher.py   # Parallel processing
 ```
 
 ---
@@ -429,7 +435,7 @@ CREATE CONSTRAINT contact_unique IF NOT EXISTS FOR (n:Contact) REQUIRE (n.tenant
 CREATE CONSTRAINT dealversion_unique IF NOT EXISTS FOR (n:DealVersion) REQUIRE (n.tenant_id, n.version_id) IS UNIQUE
 ```
 
-> **Note — Live DB Constraint Fix Required**: The live DB has a stale `deal_unique` constraint on `(tenant_id, deal_id)` from before the schema authority renamed `deal_id` → `opportunity_id`. An operator must run `DROP CONSTRAINT deal_unique` and then re-run `eq-structured-graph-core`'s `setup_db.py` to recreate with the correct property. This is outside our pipeline's scope.
+> **Note — Live DB Constraint**: The Deal DB constraint is on `(tenant_id, opportunity_id)`, managed by `DealNeo4jClient.setup_schema()`. Any stale constraints from earlier schema iterations should be dropped manually if encountered.
 
 ### Regular Indexes
 
@@ -839,7 +845,9 @@ Follows Graphiti's dedup pattern (`GRAPHITI_REFERENCE.md:52-84`).
 
 ## 11. Implementation Phases
 
-### Phase 1: Foundation
+> **All phases are complete.** Shipped in PR #1 (commit `c666e9b`, 2026-02-03).
+
+### Phase 1: Foundation ✅
 
 **Goal:** Create the package skeleton and data models.
 
@@ -852,9 +860,9 @@ Follows Graphiti's dedup pattern (`GRAPHITI_REFERENCE.md:52-84`).
   - Skeleton property names replicated from schema authority (`opportunity_id`, `amount`, `content_text`, `role`)
 - Implement `deal_graph/models/extraction.py` — `ExtractedDeal`, `DealExtractionResult`, `DealDeduplicationDecision`, `MergedDeal`
 
-### Phase 2: Neo4j Client & Schema
+### Phase 2: Neo4j Client & Schema ✅
 
-**Goal:** Establish connection to the `neo4j_structured` database and set up enrichment schema.
+**Goal:** Establish connection to the Deal Neo4j database and set up enrichment schema.
 
 > **Schema Verification Step:** Before running `setup_schema()`, connect to the database and verify skeleton constraints/labels exist. Our `setup_schema()` only creates enrichment additions (`DealVersion` constraint, vector indexes, performance indexes). Skeleton constraints are `IF NOT EXISTS` no-ops.
 
@@ -872,7 +880,7 @@ Follows Graphiti's dedup pattern (`GRAPHITI_REFERENCE.md:52-84`).
 - Write `tests/test_deal_neo4j_client.py` — schema setup tests
 - Write `tests/test_deal_repository.py` — CRUD tests including enrichment property persistence
 
-### Phase 3: Extraction
+### Phase 3: Extraction ✅
 
 **Goal:** MEDDIC extraction from transcripts via LLM.
 
@@ -890,7 +898,7 @@ Follows Graphiti's dedup pattern (`GRAPHITI_REFERENCE.md:52-84`).
   - Case A: targeted extraction for known deal
   - Confidence scoring validation
 
-### Phase 4: Entity Resolution
+### Phase 4: Entity Resolution ✅
 
 **Goal:** Match extracted deals against existing Deal nodes using dual-embedding + LLM judgment.
 
@@ -909,7 +917,7 @@ Follows Graphiti's dedup pattern (`GRAPHITI_REFERENCE.md:52-84`).
   - Below-threshold creates new
   - Zero-candidate fast-path
 
-### Phase 5: Merge & Persist
+### Phase 5: Merge & Persist ✅
 
 **Goal:** Synthesize deal updates with temporal invalidation + evolution narrative, and persist with versioning.
 
@@ -929,7 +937,7 @@ Follows Graphiti's dedup pattern (`GRAPHITI_REFERENCE.md:52-84`).
   - Version snapshot before update
   - `should_update_embedding` logic
 
-### Phase 6: Pipeline Orchestration
+### Phase 6: Pipeline Orchestration ✅
 
 **Goal:** End-to-end DealPipeline.
 
@@ -949,27 +957,27 @@ Follows Graphiti's dedup pattern (`GRAPHITI_REFERENCE.md:52-84`).
   - Interaction enrichment properties persisted (processed_at, deal_count)
   - Error handling (partial failures)
 
-### Phase 7: Dispatcher
+### Phase 7: Dispatcher ✅
 
 **Goal:** Parallel routing of transcripts to both pipelines.
 
-- Implement `dispatcher/envelope_dispatcher.py`:
+- Implement `dispatcher/dispatcher.py`:
   - `EnvelopeDispatcher` class
   - `process_envelope()` — `asyncio.gather` with `_safe_process_*` wrappers
   - `from_env()` — factory creating both pipelines
   - `close()` — cleanup both
   - `DispatchResult` dataclass with `action_item_result` + `deal_result` + per-pipeline errors
-- Write `tests/test_envelope_dispatcher.py`:
+- Write `tests/test_dispatcher.py`:
   - Both pipelines execute concurrently
   - One pipeline failure does not block the other
   - Composite result returned correctly
 
-### Phase 8: Configuration & Documentation
+### Phase 8: Configuration & Documentation ✅
 
-- Update `.env.example` with `DEAL_NEO4J_*` variables
-- Update `pyproject.toml` for package discovery (add `deal_graph` and `dispatcher`)
-- Write `docs/DEAL_ARCHITECTURE.md` — graph schema diagram, pipeline flow, MEDDIC model reference
-- Create `examples/process_deal_transcript.py` — example usage
+- Updated `.env.example` with `DEAL_NEO4J_*` variables
+- Updated `pyproject.toml` for package discovery (added `deal_graph` and `dispatcher`)
+- Wrote `docs/DEAL_SERVICE_ARCHITECTURE.md` — graph schema diagram, pipeline flow, MEDDIC model reference
+- Updated `README.md` with Deal pipeline quickstart and testing instructions
 
 ---
 
@@ -993,7 +1001,7 @@ Follow the pattern in `tests/conftest.py`:
 | `test_deal_pipeline.py` | E2E Case A, E2E Case B create, E2E Case B update, zero-deal, enrichment persistence | Integration |
 | `test_deal_repository.py` | CRUD, enrichment patterns, Interaction read/enrich, DealVersion snapshots | Integration |
 | `test_deal_neo4j_client.py` | Schema setup, vector search, dual-index search | Integration |
-| `test_envelope_dispatcher.py` | Concurrent execution, isolated failures, composite result | Integration |
+| `test_dispatcher.py` | Concurrent execution, isolated failures, composite result | Integration |
 
 ### Verification Commands
 
@@ -1002,14 +1010,29 @@ Follow the pattern in `tests/conftest.py`:
 pytest tests/test_deal_*.py -v
 
 # Run dispatcher tests
-pytest tests/test_envelope_dispatcher.py -v
+pytest tests/test_dispatcher.py -v
 
 # Run all tests (existing + new)
 pytest tests/ -v
 
-# Live integration test
-python examples/process_deal_transcript.py
+# Live E2E smoke test (dual-pipeline)
+python scripts/run_live_e2e.py
 ```
+
+### Remaining TODOs (not yet implemented)
+
+These items from the original plan are deferred to future iterations:
+
+- **Person Entity Resolution** — MEDDIC Champion and Economic Buyer are stored as
+  strings, not graph nodes. V2 could introduce `(:Person)` entities.
+- **BM25 / Hybrid Search** — Dual-embedding is the exclusive search method. BM25 and
+  Reciprocal Rank Fusion (RRF) were explicitly deferred (see Section 2).
+- **MEDDPICC extension** — Schema slots exist for Paper Process and Competition but
+  are not populated by prompts.
+- **Deal Coaching agent** — The episodic memory architecture supports it, but no agent
+  exists yet (see Strategic Recommendation S5).
+- **Postgres Synchronization** — Models are designed for 1:1 SQL table mapping, but
+  no sync layer exists yet (see Strategic Recommendation S7).
 
 ---
 
