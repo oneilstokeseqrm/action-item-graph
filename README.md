@@ -11,6 +11,8 @@ A temporal knowledge graph pipeline for extracting and managing action items fro
 - **Temporal Tracking**: Full version history and bi-temporal validity for audit trails
 - **Multi-Tenancy**: Complete data isolation via `tenant_id` and `account_id` scoping on all nodes
 - **Dual Embeddings**: Prevents embedding drift with immutable original + mutable current embeddings
+- **Deal Extraction Pipeline**: Concurrent deal detection using MEDDIC-structured extraction, vector matching with graduated thresholds, and LLM-synthesized merging
+- **Dual-Pipeline Dispatcher**: Routes each envelope to both Action Item and Deal pipelines concurrently with fault isolation
 
 ## Installation
 
@@ -54,6 +56,14 @@ OPENAI_MODEL=gpt-4.1-mini  # defaults to gpt-4.1-mini
 EMBEDDING_MODEL=text-embedding-3-small  # defaults to text-embedding-3-small
 LOG_LEVEL=INFO  # DEBUG, INFO, WARNING, ERROR
 LOG_FORMAT=json  # json or console
+
+# Deal Graph (connects to existing neo4j_structured instance)
+DEAL_NEO4J_URI=neo4j+s://xxxxx.databases.neo4j.io
+DEAL_NEO4J_PASSWORD=your-deal-password
+# DEAL_NEO4J_USERNAME=neo4j      # defaults to 'neo4j'
+# DEAL_NEO4J_DATABASE=neo4j      # defaults to 'neo4j'
+# DEAL_SIMILARITY_THRESHOLD=0.70 # Vector match threshold
+# DEAL_AUTO_MATCH_THRESHOLD=0.90 # Auto-match (skip LLM) threshold
 ```
 
 ## Quick Start
@@ -184,6 +194,10 @@ result = await pipeline.process_envelope(envelope)
 | `TopicExecutor` | Creates/links topics with evolving summaries |
 | `ActionItemRepository` | Low-level graph CRUD operations |
 | `ActionItemPipeline` | Orchestrates the full extraction-match-merge-topic flow |
+| `DealPipeline` | Orchestrates deal extraction, vector matching, and LLM-synthesized merging |
+| `EnvelopeDispatcher` | Routes envelopes to both pipelines concurrently with fault isolation |
+
+See [docs/DEAL_SERVICE_ARCHITECTURE.md](./docs/DEAL_SERVICE_ARCHITECTURE.md) for the Deal pipeline architecture.
 
 ### Graph Schema
 
@@ -243,6 +257,17 @@ python examples/run_transcript_tests.py --dry-run
 ```
 
 See [examples/transcripts/README.md](./examples/transcripts/README.md) for transcript testing documentation.
+
+### Live E2E Smoke Test (Dual-Pipeline)
+
+```bash
+# Requires both NEO4J_* and DEAL_NEO4J_* credentials in .env
+python scripts/run_live_e2e.py
+```
+
+Runs all 4 transcripts through the full `EnvelopeDispatcher`, exercising both the
+Action Item and Deal pipelines concurrently. See [docs/LIVE_E2E_TEST_RESULTS.md](./docs/LIVE_E2E_TEST_RESULTS.md)
+for the latest validated run results.
 
 ## API Reference
 
@@ -363,11 +388,22 @@ action-item-graph/
 │   ├── process_transcript.py # Basic usage example
 │   ├── run_transcript_tests.py # Transcript test runner
 │   └── transcripts/          # Real transcript testing
+├── src/deal_graph/              # Deal extraction pipeline
+│   ├── pipeline/                # DealExtractor, DealMatcher, DealMerger
+│   ├── clients/                 # DealNeo4jClient (vector search, schema)
+│   ├── models/                  # ExtractedDeal, MergedDeal
+│   └── repository.py           # DealRepository (graph CRUD)
+├── src/dispatcher/              # Dual-pipeline envelope dispatcher
+│   └── dispatcher.py            # EnvelopeDispatcher, DispatcherResult
+├── scripts/
+│   └── run_live_e2e.py          # Live E2E smoke test (dual-pipeline)
 ├── docs/
-│   ├── API.md                # API reference
-│   ├── PIPELINE_GUIDE.md     # Comprehensive pipeline guide
+│   ├── API.md                   # API reference
+│   ├── PIPELINE_GUIDE.md        # Comprehensive pipeline guide
 │   ├── PHASE7_TOPIC_GROUPING.md # Topic feature documentation
-│   └── test-data-report.md   # Test results report
+│   ├── DEAL_SERVICE_ARCHITECTURE.md # Deal pipeline architecture
+│   ├── LIVE_E2E_TEST_RESULTS.md # E2E smoke test validation record
+│   └── test-data-report.md      # Test results report
 ├── ARCHITECTURE.md           # Detailed architecture docs
 ├── REQUIREMENTS.md           # Functional requirements
 ├── CHANGELOG.md              # Version history

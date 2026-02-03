@@ -11,6 +11,7 @@ dependencies = [
     "tenacity>=9.0.0",
     "numpy>=1.26.0",
     "structlog>=24.0.0",
+    "fastuuid>=0.14",
 ]
 
 [project.optional-dependencies]

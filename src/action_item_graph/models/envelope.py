@@ -89,7 +89,7 @@ class EnvelopeV1(BaseModel):
     )
     account_id: str | None = Field(
         default=None,
-        description='Account identifier for CRM/sales context (optional but recommended for action item graph)',
+        description='Account identifier for account-level sales context (optional but recommended for action item graph)',
     )
 
     # Helper properties for common extras
@@ -128,7 +128,7 @@ class EnvelopeV1(BaseModel):
                     'timestamp': '2025-01-23T10:30:00Z',
                     'source': 'web-mic',
                     'extras': {
-                        'opportunity_id': 'opp_deal_456',
+                        'opportunity_id': '019c1fa0-4444-7000-8000-000000000005',
                         'contact_ids': ['contact_sarah_001'],
                     },
                     'account_id': 'acct_acme_corp_001',

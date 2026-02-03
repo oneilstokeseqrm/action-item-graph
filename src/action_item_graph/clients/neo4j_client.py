@@ -160,34 +160,57 @@ class Neo4jClient:
         """
         Create all necessary constraints and indexes.
 
+        Constraints use tenant-scoped NODE KEY on (tenant_id, id) for
+        multi-tenant isolation.  Migration from older global single-property
+        constraints is handled automatically: new composite constraints are
+        created first, then stale global ones are dropped.
+
         Returns:
             Dict with lists of created constraints and indexes
         """
         created = {'constraints': [], 'indexes': [], 'vector_indexes': []}
 
-        # Constraints for uniqueness
-        constraints = [
-            ('account_id_unique', 'Account', 'id'),
-            ('interaction_id_unique', 'Interaction', 'id'),
-            ('action_item_id_unique', 'ActionItem', 'id'),
-            ('action_item_version_id_unique', 'ActionItemVersion', 'id'),
-            ('owner_id_unique', 'Owner', 'id'),
-            ('contact_id_unique', 'Contact', 'id'),
-            ('deal_id_unique', 'Deal', 'id'),
-            ('topic_id_unique', 'Topic', 'id'),
-            ('topic_version_id_unique', 'TopicVersion', 'id'),
+        # --- Step 1: Create tenant-scoped NODE KEY constraints -----------
+        # NODE KEY enforces existence + uniqueness of (tenant_id, id).
+        composite_constraints = [
+            ('account_tenant_key', 'Account'),
+            ('interaction_tenant_key', 'Interaction'),
+            ('action_item_tenant_key', 'ActionItem'),
+            ('action_item_version_tenant_key', 'ActionItemVersion'),
+            ('owner_tenant_key', 'Owner'),
+            ('topic_tenant_key', 'Topic'),
+            ('topic_version_tenant_key', 'TopicVersion'),
         ]
 
-        for name, label, prop in constraints:
+        for name, label in composite_constraints:
             try:
                 await self.execute_write(
-                    f'CREATE CONSTRAINT {name} IF NOT EXISTS FOR (n:{label}) REQUIRE n.{prop} IS UNIQUE'
+                    f'CREATE CONSTRAINT {name} IF NOT EXISTS '
+                    f'FOR (n:{label}) REQUIRE (n.tenant_id, n.id) IS NODE KEY'
                 )
                 created['constraints'].append(name)
             except Exception as e:
-                # Constraint might already exist
                 if 'already exists' not in str(e).lower():
                     raise
+
+        # --- Step 2: Drop stale global single-property constraints -------
+        # These are superseded by the composite constraints above.
+        # Only covers labels owned by the Action Item pipeline.
+        legacy_constraints = [
+            'account_id_unique',
+            'interaction_id_unique',
+            'action_item_id_unique',
+            'action_item_version_id_unique',
+            'owner_id_unique',
+            'topic_id_unique',
+            'topic_version_id_unique',
+        ]
+
+        for name in legacy_constraints:
+            try:
+                await self.execute_write(f'DROP CONSTRAINT {name} IF EXISTS')
+            except Exception:
+                pass  # already gone
 
         # Regular indexes for common queries
         indexes = [

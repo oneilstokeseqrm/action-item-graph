@@ -77,3 +77,52 @@ def sample_tenant_id() -> str:
 def sample_account_id() -> str:
     """Sample account ID for testing."""
     return 'acct_test_001'
+
+
+# =========================================================================
+# Deal Pipeline Fixtures
+# =========================================================================
+
+
+@pytest.fixture
+def deal_neo4j_credentials() -> dict[str, str]:
+    """Get Deal Neo4j credentials from environment."""
+    uri = os.getenv('DEAL_NEO4J_URI')
+    password = os.getenv('DEAL_NEO4J_PASSWORD')
+    if not uri or not password:
+        pytest.skip('DEAL_NEO4J_URI or DEAL_NEO4J_PASSWORD not set')
+    return {
+        'uri': uri,
+        'username': os.getenv('DEAL_NEO4J_USERNAME', 'neo4j'),
+        'password': password,
+        'database': os.getenv('DEAL_NEO4J_DATABASE', 'neo4j'),
+    }
+
+
+@pytest.fixture
+def sample_deal_transcript() -> str:
+    """Sample sales transcript for MEDDIC extraction testing."""
+    return """
+Sarah: Thanks for taking the time to meet with us today. I wanted to walk you through how our
+platform can help with the data silo issues you mentioned in our last call.
+
+James: Yes, that's been a major pain point. We're spending about 40 hours a week just
+reconciling data between our three CRM systems. It's costing us roughly $200K annually
+in lost productivity.
+
+Sarah: That's significant. Our platform typically reduces that reconciliation time by about 80%.
+Based on what you've described, we'd be looking at a deal in the range of $150K for the
+enterprise license.
+
+James: That's within our budget range. I should mention that our VP of Engineering, Maria Chen,
+will need to sign off on any technology purchase over $100K. She's the final decision maker
+on the budget side.
+
+Sarah: Good to know. What does your evaluation process typically look like?
+
+James: We'd need a technical proof-of-concept first, then a security review — SOC2 compliance
+is a must for us. After that, Maria and the procurement team would review the contract.
+I'm hoping we can close this by the end of Q2.
+
+Sarah: That timeline works for us. I'll coordinate with your team on the POC setup.
+""".strip()
