@@ -157,6 +157,10 @@ class ActionItemRepository:
         """
         Create an ActionItem node and link to Account.
 
+        Uses MERGE on ActionItem.id so that duplicate writes (e.g. from
+        dict-key collisions in the pipeline's text-based lookup) are
+        idempotent instead of raising a constraint violation.
+
         Args:
             action_item: ActionItem model with embeddings
 
@@ -166,7 +170,8 @@ class ActionItemRepository:
         props = action_item.to_neo4j_properties()
 
         query = """
-            CREATE (ai:ActionItem $props)
+            MERGE (ai:ActionItem {id: $id, tenant_id: $tenant_id})
+            ON CREATE SET ai += $props
             WITH ai
             OPTIONAL MATCH (a:Account {id: $account_id, tenant_id: $tenant_id})
             FOREACH (_ IN CASE WHEN a IS NOT NULL THEN [1] ELSE [] END |
@@ -177,9 +182,10 @@ class ActionItemRepository:
         result = await self.neo4j.execute_write(
             query,
             {
+                'id': props['id'],
+                'tenant_id': str(action_item.tenant_id),
                 'props': props,
                 'account_id': action_item.account_id,
-                'tenant_id': str(action_item.tenant_id),
             },
         )
         return result[0]['action_item'] if result else {}

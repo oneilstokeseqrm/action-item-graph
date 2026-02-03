@@ -34,7 +34,7 @@ from ..repository import ActionItemRepository
 from .extractor import ActionItemExtractor, ExtractionOutput
 from .matcher import ActionItemMatcher, MatchResult
 from .merger import ActionItemMerger, MergeResult
-from .topic_resolver import TopicResolver, TopicResolutionResult
+from .topic_resolver import TopicResolver
 from .topic_executor import TopicExecutor, TopicExecutionResult
 
 logger = get_logger(__name__)
@@ -286,7 +286,7 @@ class ActionItemPipeline:
 
                 # Step 4: Match against existing items (account-scoped)
                 with timer.stage("matching"):
-                    match_results = await self._match_extractions(
+                    match_results, filtered_action_items = await self._match_extractions(
                         extraction=extraction,
                         tenant_id=tenant_id,
                         account_id=account_id,
@@ -305,7 +305,8 @@ class ActionItemPipeline:
                 with timer.stage("merging"):
                     merge_results = await self._execute_merges(
                         match_results=match_results,
-                        extraction=extraction,
+                        action_items=filtered_action_items,
+                        interaction=extraction.interaction,
                     )
 
                 # Step 6: Topic Resolution (Phase 7: Topic Grouping)
@@ -314,7 +315,6 @@ class ActionItemPipeline:
                         topic_exec_results = await self._process_topics(
                             match_results=match_results,
                             merge_results=merge_results,
-                            extraction=extraction,
                             tenant_id=tenant_id,
                             account_id=account_id,
                         )
@@ -455,7 +455,7 @@ class ActionItemPipeline:
 
             # Match and merge
             with timer.stage("matching"):
-                match_results = await self._match_extractions(
+                match_results, filtered_action_items = await self._match_extractions(
                     extraction=extraction,
                     tenant_id=tenant_id,
                     account_id=account_id,
@@ -467,7 +467,8 @@ class ActionItemPipeline:
             with timer.stage("merging"):
                 merge_results = await self._execute_merges(
                     match_results=match_results,
-                    extraction=extraction,
+                    action_items=filtered_action_items,
+                    interaction=extraction.interaction,
                 )
 
             for merge_result in merge_results:
@@ -486,7 +487,6 @@ class ActionItemPipeline:
                     topic_exec_results = await self._process_topics(
                         match_results=match_results,
                         merge_results=merge_results,
-                        extraction=extraction,
                         tenant_id=tenant_id,
                         account_id=account_id,
                     )
@@ -514,7 +514,7 @@ class ActionItemPipeline:
         extraction: ExtractionOutput,
         tenant_id: UUID,
         account_id: str,
-    ) -> list[MatchResult]:
+    ) -> tuple[list[MatchResult], list[ActionItem]]:
         """
         Match extracted items against existing items in the graph.
 
@@ -524,60 +524,60 @@ class ActionItemPipeline:
             account_id: Account ID (required for scoping)
 
         Returns:
-            List of MatchResult objects
+            Tuple of (match_results, filtered_action_items), 1:1 aligned.
+            Both lists have the same length and positional correspondence.
         """
         # Pair action items with their embeddings and raw extractions
-        items_with_embeddings = [
-            (raw, ai.embedding)
+        triples = [
+            (ai, raw, ai.embedding)
             for ai, raw in zip(extraction.action_items, extraction.raw_extractions)
             if ai.embedding is not None
         ]
 
-        if not items_with_embeddings:
-            return []
+        if not triples:
+            return [], []
 
-        # Run matching (account-scoped)
-        return await self.matcher.find_matches(
-            extracted_items=items_with_embeddings,
+        # Split into parallel lists — preserves positional alignment
+        filtered_action_items = [ai for ai, _, _ in triples]
+        extracted_pairs = [(raw, emb) for _, raw, emb in triples]
+
+        # Run matching (account-scoped) — returns 1:1 with extracted_pairs
+        match_results = await self.matcher.find_matches(
+            extracted_items=extracted_pairs,
             tenant_id=tenant_id,
             account_id=account_id,
         )
 
+        return match_results, filtered_action_items
+
     async def _execute_merges(
         self,
         match_results: list[MatchResult],
-        extraction: ExtractionOutput,
+        action_items: list[ActionItem],
+        interaction: Interaction,
     ) -> list[MergeResult]:
         """
         Execute merge decisions for all match results.
 
+        ``match_results`` and ``action_items`` must be 1:1 aligned
+        (same length, same positional order) — guaranteed by
+        ``_match_extractions`` which produces both lists from the
+        same filtered zip.
+
         Args:
             match_results: Results from matching phase
-            extraction: Original extraction output
+            action_items: Filtered ActionItem objects (1:1 with match_results)
+            interaction: The Interaction for this processing run
 
         Returns:
-            List of MergeResult objects
+            List of MergeResult objects (1:1 with inputs)
         """
-        # Build lookup from extraction text to ActionItem
-        action_item_lookup = {
-            ai.action_item_text: ai
-            for ai in extraction.action_items
-        }
-
         merge_results = []
 
-        for match_result in match_results:
-            # Find corresponding ActionItem
-            action_item = action_item_lookup.get(match_result.extracted_item.action_item_text)
-
-            if action_item is None:
-                # Shouldn't happen, but handle gracefully
-                continue
-
-            # Execute the merge decision
+        for match_result, action_item in zip(match_results, action_items):
             merge_result = await self.merger.execute_decision(
                 match_result=match_result,
-                interaction=extraction.interaction,
+                interaction=interaction,
                 action_item=action_item,
             )
 
@@ -640,7 +640,6 @@ class ActionItemPipeline:
         self,
         match_results: list[MatchResult],
         merge_results: list[MergeResult],
-        extraction: ExtractionOutput,
         tenant_id: UUID,
         account_id: str,
     ) -> list[TopicExecutionResult]:
@@ -648,13 +647,13 @@ class ActionItemPipeline:
         Process topic resolution for all extracted action items.
 
         This phase runs AFTER merging to ensure action items have been persisted.
-        We use text-based lookup to correlate match_results with merge_results
-        to handle cases where items may have been filtered during matching.
+        ``match_results`` and ``merge_results`` are 1:1 aligned — both produced
+        from the same filtered action item list via ``_match_extractions`` and
+        ``_execute_merges``.
 
         Args:
             match_results: Results from matching phase (contains extracted_item with topic)
-            merge_results: Results from merging phase (contains action_item_id)
-            extraction: Original extraction output
+            merge_results: Results from merging phase (contains action_item_id), 1:1 with match_results
             tenant_id: Tenant UUID
             account_id: Account identifier
 
@@ -663,33 +662,11 @@ class ActionItemPipeline:
         """
         topic_results = []
 
-        # Build a lookup from action_item_id to merge_result
-        # merge_result.action_item_id is the persisted action item's ID
-        merge_by_id: dict[str, MergeResult] = {
-            mr.action_item_id: mr for mr in merge_results if mr.action_item_id
-        }
-
-        # Build a lookup from action_item_text to action_item_id
-        # Using extraction.action_items which have the same text as raw_extractions
-        text_to_id: dict[str, str] = {}
-        for ai in extraction.action_items:
-            if ai.action_item_text and str(ai.id) in merge_by_id:
-                text_to_id[ai.action_item_text] = str(ai.id)
-
-        # Process each match result (which contains the extracted_item with topic)
-        for match_result in match_results:
+        for match_result, merge_result in zip(match_results, merge_results):
             extracted = match_result.extracted_item
-
-            # Find the corresponding action_item_id via text lookup
-            action_item_id = text_to_id.get(extracted.action_item_text)
+            action_item_id = merge_result.action_item_id
 
             if not action_item_id:
-                logger.warning(
-                    "topic_resolution_skipped_no_action_item",
-                    extraction_text=extracted.action_item_text[:50]
-                    if extracted.action_item_text
-                    else "",
-                )
                 continue
 
             # Check if the extraction has a topic
