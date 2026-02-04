@@ -47,8 +47,21 @@ share no data, no constraints, and no driver connections:
 | Client class | `Neo4jClient` | `DealNeo4jClient` |
 | Schema owner | `Neo4jClient.setup_schema()` | `DealNeo4jClient.setup_schema()` |
 | Node labels | Account, Interaction, ActionItem, ActionItemVersion, Owner, Topic, TopicVersion | Deal, DealVersion, Interaction, Account |
-| Constraints | NODE KEY on `(tenant_id, id)` per label | UNIQUENESS on `(tenant_id, *)` per label |
 | Vector indexes | 4 (ActionItem + Topic × embedding/embedding_current) | 2 (Deal × embedding/embedding_current) |
+
+**What `DealNeo4jClient.setup_schema()` creates (enrichment-only):**
+
+| Type | Name | Target |
+|------|------|--------|
+| Uniqueness constraint | `dealversion_unique` | `DealVersion (tenant_id, version_id)` |
+| Index | `deal_stage_idx` | `Deal (tenant_id, stage)` |
+| Index | `deal_account_idx` | `Deal (tenant_id, account_id)` |
+| Vector index | `deal_embedding_idx` | `Deal.embedding` (1536-dim, cosine) |
+| Vector index | `deal_embedding_current_idx` | `Deal.embedding_current` (1536-dim, cosine) |
+
+Skeleton constraints on Deal, Interaction, Account, and Contact are **not created
+by our code** — they are expected to already exist in the database, and
+`verify_skeleton_schema()` checks for their presence before the pipeline starts.
 
 `DealNeo4jClient` inherits connection/retry logic from `Neo4jClient` but overrides
 `setup_schema()` entirely. Instantiated with `DEAL_NEO4J_*` credentials, it cannot
@@ -274,19 +287,24 @@ human-readable display in logs and UIs.
 
 ### Deal DB Nodes and Relationships
 
-The Deal DB contains four node labels and their relationships:
+The Deal DB contains four node labels. Our pipeline creates **one relationship type**:
 
 ```
-(:Deal)-[:HAS_VERSION]->(:DealVersion)
-(:Deal)-[:RELATED_TO]->(:Account)
-(:Interaction)-[:RELATED_TO]->(:Deal)
-(:Interaction)-[:BELONGS_TO]->(:Account)
+(:Deal)-[:HAS_VERSION]->(:DealVersion)   # Created by repository.create_version_snapshot()
 ```
 
-All relationships are **graph edges** (not "linked by property"). Provenance is
-tracked via properties: `Deal.source_interaction_id` records the creating
-interaction, and `DealVersion.change_source_interaction_id` records which
-interaction triggered each version change.
+Other node associations use **shared properties** rather than graph edges:
+
+- `Deal.account_id` links a Deal to its Account (property-based, not an edge)
+- `Deal.source_interaction_id` records which Interaction created the Deal (property)
+- `DealVersion.change_source_interaction_id` records which Interaction triggered
+  each version change (property)
+- `DealVersion.deal_opportunity_id` links back to the parent Deal (property)
+
+> **Note**: The skeleton layer (`eq-structured-graph-core`) may create additional
+> edges such as `(:Interaction)-[:RELATED_TO]->(:Deal)` and
+> `(:Deal)-[:RELATED_TO]->(:Account)`. Our pipeline does not create or depend on
+> these edges.
 
 | Node | Key Properties | Role |
 |------|---------------|------|

@@ -215,6 +215,8 @@ All interactions have `interaction_type=transcript` and `processed=Yes`. Interac
 
 ### 5.1 Action Items (45)
 
+The action item table below is truncated for readability; totals reflect the full run.
+
 | # | Summary | Owner | Topic | Source |
 |---|---------|-------|-------|--------|
 | 1 | Ensure session recording is captured and shared with the team | E | Meeting Recording And Sharing | Call 1 |
