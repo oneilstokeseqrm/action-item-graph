@@ -36,6 +36,37 @@ independently.
 
 **Entry point**: `EnvelopeDispatcher.dispatch(envelope)` in `src/dispatcher/dispatcher.py`
 
+### Two Separate Neo4j Databases
+
+The AI and Deal pipelines write to **physically separate Neo4j Aura instances**. They
+share no data, no constraints, and no driver connections:
+
+| Aspect | AI DB | Deal DB |
+|--------|-------|---------|
+| Env vars | `NEO4J_URI`, `NEO4J_PASSWORD` | `DEAL_NEO4J_URI`, `DEAL_NEO4J_PASSWORD` |
+| Client class | `Neo4jClient` | `DealNeo4jClient` |
+| Schema owner | `Neo4jClient.setup_schema()` | `DealNeo4jClient.setup_schema()` |
+| Node labels | Account, Interaction, ActionItem, ActionItemVersion, Owner, Topic, TopicVersion | Deal, DealVersion, Interaction, Account |
+| Vector indexes | 4 (ActionItem + Topic × embedding/embedding_current) | 2 (Deal × embedding/embedding_current) |
+
+**What `DealNeo4jClient.setup_schema()` creates (enrichment-only):**
+
+| Type | Name | Target |
+|------|------|--------|
+| Uniqueness constraint | `dealversion_unique` | `DealVersion (tenant_id, version_id)` |
+| Index | `deal_stage_idx` | `Deal (tenant_id, stage)` |
+| Index | `deal_account_idx` | `Deal (tenant_id, account_id)` |
+| Vector index | `deal_embedding_idx` | `Deal.embedding` (1536-dim, cosine) |
+| Vector index | `deal_embedding_current_idx` | `Deal.embedding_current` (1536-dim, cosine) |
+
+Skeleton constraints on Deal, Interaction, Account, and Contact are **not created
+by our code** — they are expected to already exist in the database, and
+`verify_skeleton_schema()` checks for their presence before the pipeline starts.
+
+`DealNeo4jClient` inherits connection/retry logic from `Neo4jClient` but overrides
+`setup_schema()` entirely. Instantiated with `DEAL_NEO4J_*` credentials, it cannot
+reach the AI DB.
+
 ---
 
 ## Deal Pipeline Stages
@@ -224,6 +255,115 @@ Deal data follows the MEDDIC sales methodology framework:
 | **C**hampion | `champion` | Replaceable |
 
 `meddic_completeness` is tracked as a 0.0-1.0 score (populated dimensions / 6).
+
+---
+
+## Data Model & Identity Contract
+
+### Canonical Identifiers
+
+| Identifier | Scope | Format | Minted By |
+|------------|-------|--------|-----------|
+| `tenant_id` | Global | UUID v4 | Upstream system |
+| `account_id` | Per tenant | String | Upstream system |
+| `interaction_id` | Per tenant | UUID v4 | `EnvelopeV1.interaction_id` or generated |
+| `opportunity_id` | Per tenant | **UUID v7** (RFC 9562) | `deal_graph.utils.uuid7()` |
+
+`opportunity_id` is the canonical primary key for deals, minted by our system.
+UUIDv7 encodes a millisecond timestamp in the high 48 bits, making IDs naturally
+time-ordered and sortable. It is stored as a string in Neo4j (via
+`Deal.to_neo4j_properties()`) and as a stdlib `uuid.UUID` in the Pydantic model.
+
+**`deal_ref`** is a display-only alias derived from the random tail of the UUIDv7:
+
+```python
+deal_ref = f"deal_{opportunity_id.hex[-16:]}"
+```
+
+The last 16 hex chars (64 bits) come from the random portion of UUIDv7, providing
+collision resistance even for deals created within the same millisecond. `deal_ref`
+is never used for identity, matching, or graph keys — it exists solely for
+human-readable display in logs and UIs.
+
+### Deal DB Nodes and Relationships
+
+The Deal DB contains four node labels. Our pipeline creates **one relationship type**:
+
+```
+(:Deal)-[:HAS_VERSION]->(:DealVersion)   # Created by repository.create_version_snapshot()
+```
+
+Other node associations use **shared properties** rather than graph edges:
+
+- `Deal.account_id` links a Deal to its Account (property-based, not an edge)
+- `Deal.source_interaction_id` records which Interaction created the Deal (property)
+- `DealVersion.change_source_interaction_id` records which Interaction triggered
+  each version change (property)
+- `DealVersion.deal_opportunity_id` links back to the parent Deal (property)
+
+> **Note**: The skeleton layer (`eq-structured-graph-core`) may create additional
+> edges such as `(:Interaction)-[:RELATED_TO]->(:Deal)` and
+> `(:Deal)-[:RELATED_TO]->(:Account)`. Our pipeline does not create or depend on
+> these edges.
+
+| Node | Key Properties | Role |
+|------|---------------|------|
+| `Deal` | `tenant_id`, `opportunity_id`, MEDDIC fields, embeddings | Primary entity |
+| `DealVersion` | `tenant_id`, `version_id`, snapshot fields, `changed_fields` | Temporal snapshot |
+| `Interaction` | `tenant_id`, `interaction_id`, `content_text` | Episodic memory |
+| `Account` | `tenant_id`, `account_id` | Tenant/account scoping |
+
+### Multi-Tenancy & Scoping
+
+All Deal DB queries are scoped by `tenant_id` and `account_id`:
+
+- **`tenant_id`** is a composite key component on every node. Constraints enforce
+  uniqueness within a tenant (e.g., `(tenant_id, opportunity_id)` on `Deal`).
+- **`account_id`** scopes vector search to prevent cross-account matching. A deal
+  for "Acme Corp" will never match against "Beta Inc" deals, even within the same
+  tenant.
+- Vector search filters: `WHERE node.tenant_id = $tenant_id AND
+  node.account_id = $account_id` are applied in `DealNeo4jClient` search methods.
+- **AI DB constraints are managed by `Neo4jClient`; Deal DB constraints are managed
+  by `DealNeo4jClient`.** These are separate Neo4j instances with independent schema
+  lifecycle.
+
+### Idempotency & Failure Modes
+
+**Idempotent operations:**
+
+- `DealNeo4jClient.setup_schema()` — all constraints/indexes use `IF NOT EXISTS`.
+  Safe to call on every startup.
+- `DealRepository.verify_account()` — uses `MERGE` on `(tenant_id, account_id)`.
+  Creates the Account node only if absent.
+- `DealRepository.ensure_interaction()` — uses `MERGE` on `(tenant_id, interaction_id)`.
+  Creates or updates enrichment properties.
+- `DealRepository.create_deal()` — uses `MERGE` on `(tenant_id, opportunity_id)`.
+  Re-processing the same envelope does not create duplicate deals.
+
+**Non-idempotent operations:**
+
+- `DealRepository.create_version_snapshot()` — always creates a new `DealVersion`.
+  Re-processing creates an additional version snapshot.
+- `DealRepository.update_deal()` — increments `version` and updates `last_updated_at`.
+  Re-processing advances version count.
+
+**Retry behavior:**
+
+- `Neo4jClient.execute_query()` uses `tenacity` with 3 attempts and exponential
+  backoff (1s → 2s → 4s max 10s). Transient Neo4j Aura connectivity flakiness
+  (`ServiceUnavailable`, `SessionExpired`) is retried automatically.
+- OpenAI calls use the `openai` SDK's built-in retry logic.
+
+**Expected failure modes:**
+
+| Failure | Behavior | Impact |
+|---------|----------|--------|
+| OpenAI API error | Extraction/merge fails for that deal | Other deals in same transcript still process (accumulative) |
+| Neo4j transient disconnect | Retried 3× with backoff | Usually self-heals; persistent failure raises exception |
+| Invalid transcript (< 50 chars) | Skipped with warning | No deals extracted, no DB writes |
+| No deals in transcript | `has_deals=false`, early exit | Clean no-op |
+| One deal fails in multi-deal transcript | Error accumulated, others proceed | `DealPipelineResult.errors` captures per-deal failures |
 
 ---
 

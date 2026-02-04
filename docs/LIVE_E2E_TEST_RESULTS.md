@@ -7,6 +7,20 @@
 **Total wall-clock time**: 343,815 ms
 **Verdict**: ALL PIPELINES SUCCEEDED FOR ALL TRANSCRIPTS. Zero errors.
 
+> **Run variability**: This document is a point-in-time snapshot. Specific values
+> (IDs, amounts, action item text, topic names, owner resolution) **will differ
+> between runs** due to LLM non-determinism. The purpose of this doc is to validate
+> **contracts and invariants** — not to pin exact outputs. Stable invariants include:
+> deal count, pipeline success/failure, constraint behavior, and structural
+> relationships.
+
+> **Two Neo4j databases**: The E2E test exercises two physically separate Neo4j Aura
+> instances — the **AI DB** (`NEO4J_URI`) for action items/topics and the **Deal DB**
+> (`DEAL_NEO4J_URI`) for deals/versions. They share no data, constraints, or
+> connections. See
+> [`DEAL_SERVICE_ARCHITECTURE.md`](./DEAL_SERVICE_ARCHITECTURE.md#two-separate-neo4j-databases)
+> for details.
+
 **Changes since previous run:**
 - AI DB constraints upgraded from global single-property UNIQUENESS to tenant-scoped NODE KEY on `(tenant_id, id)` for all 7 active labels. Deal DB constraints NOT touched.
 - `_execute_merges` and `_process_topics` dict-keyed lookup replaced with 1:1 zip alignment to fix deterministic duplicate-text collision bug.
@@ -19,8 +33,8 @@
 | Setting | Value |
 |---------|-------|
 | Transcripts | 4 (sorted by sequence) |
-| AI DB | Neo4j (NEO4J_URI) — Action Items, Topics, Owners |
-| Deal DB | Neo4j (DEAL_NEO4J_URI) — Deals, DealVersions, Interactions, Accounts |
+| AI DB | Neo4j Aura instance (`NEO4J_URI`) — Action Items, Topics, Owners, Interactions, Accounts |
+| Deal DB | Neo4j Aura instance (`DEAL_NEO4J_URI`) — Deals, DealVersions, Interactions, Accounts (**separate instance**) |
 | LLM | OpenAI (`gpt-4o-mini`) via structured output |
 | Embeddings | OpenAI `text-embedding-3-small` (1536-dim) |
 | Pre-run cleanup | Both DBs wiped for tenant before run |
@@ -201,6 +215,8 @@ All interactions have `interaction_type=transcript` and `processed=Yes`. Interac
 
 ### 5.1 Action Items (45)
 
+The action item table below is truncated for readability; totals reflect the full run.
+
 | # | Summary | Owner | Topic | Source |
 |---|---------|-------|-------|--------|
 | 1 | Ensure session recording is captured and shared with the team | E | Meeting Recording And Sharing | Call 1 |
@@ -343,6 +359,6 @@ NODE KEY enforces both existence and uniqueness of `(tenant_id, id)` — the str
 - [x] `create_action_item` MERGE includes `tenant_id` in match key
 - [x] Duplicate-text regression test: `tests/test_duplicate_text.py` (3 tests, all pass)
 - [x] No CRM/Salesforce references in pipeline prompts
-- [x] Unit tests: 263 passed, 0 failed
+- [x] Unit tests: 266 passed, 0 failed (count as of 2026-02-03; may change as tests are added)
 - [x] AI pipeline: ActionItem persistence idempotent (MERGE on node key)
 - [x] AI pipeline: 35 items, 16 topics, 100% topic coverage
