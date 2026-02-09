@@ -355,8 +355,9 @@ python scripts/run_live_e2e.py
 
 Runs all 4 transcripts through the full `EnvelopeDispatcher`, exercising both the
 Action Item and Deal pipelines concurrently against live Neo4j Aura instances. See
-[docs/LIVE_E2E_TEST_RESULTS.md](./docs/LIVE_E2E_TEST_RESULTS.md) for the latest
-validated run results.
+[docs/SMOKE_TEST_GUIDE.md](./docs/SMOKE_TEST_GUIDE.md) for comprehensive testing
+procedures, and [docs/LIVE_E2E_TEST_RESULTS.md](./docs/LIVE_E2E_TEST_RESULTS.md)
+for the latest validated run results.
 
 ## API Reference
 
@@ -497,6 +498,7 @@ action-item-graph/
 │   ├── PIPELINE_GUIDE.md        # Comprehensive pipeline guide
 │   ├── PHASE7_TOPIC_GROUPING.md # Topic feature documentation
 │   ├── DEAL_SERVICE_ARCHITECTURE.md # Deal pipeline architecture
+│   ├── SMOKE_TEST_GUIDE.md      # Comprehensive smoke test & E2E guide
 │   ├── LIVE_E2E_TEST_RESULTS.md # E2E smoke test validation record
 │   └── test-data-report.md      # Test results report
 ├── ARCHITECTURE.md           # Detailed architecture docs

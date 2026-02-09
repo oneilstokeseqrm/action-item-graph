@@ -477,3 +477,11 @@ src/dispatcher/
 ├── __init__.py
 └── dispatcher.py                # EnvelopeDispatcher, DispatcherResult
 ```
+
+---
+
+## Related Documentation
+
+- [ARCHITECTURE.md](../ARCHITECTURE.md) — Full system architecture (both pipelines)
+- [SMOKE_TEST_GUIDE.md](./SMOKE_TEST_GUIDE.md) — E2E validation procedures and historical results
+- [LIVE_E2E_TEST_RESULTS.md](./LIVE_E2E_TEST_RESULTS.md) — Most recent live run validation record
