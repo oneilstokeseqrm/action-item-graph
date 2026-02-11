@@ -289,7 +289,7 @@ class TopicResolver:
             node = result['node']
             candidates.append(
                 TopicCandidate(
-                    topic_id=node['id'],
+                    topic_id=node['action_item_topic_id'],
                     name=node['name'],
                     canonical_name=node.get('canonical_name', ''),
                     summary=node.get('summary', ''),

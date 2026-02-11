@@ -161,9 +161,9 @@ class TestTopicLinking:
             await repository.ensure_account(tenant_id, account_id, "Test Account")
 
             # Create an existing topic
-            from action_item_graph.models.topic import Topic
+            from action_item_graph.models.topic import ActionItemTopic
 
-            existing_topic = Topic(
+            existing_topic = ActionItemTopic(
                 id=uuid.uuid4(),
                 tenant_id=tenant_id,
                 account_id=account_id,

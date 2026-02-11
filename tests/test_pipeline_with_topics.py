@@ -279,7 +279,7 @@ Sarah: I'll coordinate with marketing on the launch campaign.
             assert isinstance(topics, list)
             if len(topics) > 0:
                 topic = topics[0]
-                assert 'id' in topic
+                assert 'action_item_topic_id' in topic
                 assert 'name' in topic
                 assert 'tenant_id' in topic
                 assert topic['tenant_id'] == str(tenant_id)

@@ -285,20 +285,20 @@ class TestNeo4jRelationships:
             # Create account and interaction with relationship
             await client.execute_write(
                 """
-                MERGE (acc:Account {id: $account_id})
+                MERGE (acc:Account {account_id: $account_id})
                 SET acc.tenant_id = $tenant_id, acc.name = 'Test Account'
 
                 CREATE (int:Interaction {
-                    id: $interaction_id,
+                    interaction_id: $interaction_id,
                     tenant_id: $tenant_id,
                     account_id: $account_id,
                     interaction_type: 'transcript',
-                    transcript_text: 'Test transcript content',
-                    occurred_at: datetime()
+                    content_text: 'Test transcript content',
+                    timestamp: datetime()
                 })
 
                 MERGE (acc)-[:HAS_INTERACTION]->(int)
-                RETURN acc.id as account_id, int.id as interaction_id
+                RETURN acc.account_id as account_id, int.interaction_id as interaction_id
                 """,
                 {
                     'account_id': account_id,
@@ -310,7 +310,7 @@ class TestNeo4jRelationships:
             # Query the relationship
             result = await client.execute_query(
                 """
-                MATCH (acc:Account {id: $account_id})-[:HAS_INTERACTION]->(int:Interaction)
+                MATCH (acc:Account {account_id: $account_id})-[:HAS_INTERACTION]->(int:Interaction)
                 RETURN acc.name as account_name, int.interaction_type as type
                 """,
                 {'account_id': account_id},
@@ -327,7 +327,7 @@ class TestNeo4jRelationships:
             # Cleanup
             await client.execute_write(
                 """
-                MATCH (acc:Account {id: $account_id})
+                MATCH (acc:Account {account_id: $account_id})
                 OPTIONAL MATCH (acc)-[:HAS_INTERACTION]->(int:Interaction)
                 DETACH DELETE acc, int
                 """,

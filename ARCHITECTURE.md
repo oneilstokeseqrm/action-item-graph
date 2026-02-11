@@ -2,7 +2,7 @@
 
 ## Overview
 
-A dual-pipeline system for extracting action items and deals from call transcripts. Both pipelines run concurrently against **separate Neo4j AuraDB instances**, sharing only an OpenAI client.
+A dual-pipeline system for extracting action items and deals from call transcripts. Both pipelines run concurrently against **a single shared Neo4j AuraDB instance**, sharing both the database and an OpenAI client.
 
 ## System Architecture
 
@@ -27,11 +27,12 @@ A dual-pipeline system for extracting action items and deals from call transcrip
     │ Merge  → Topics     │     │ Merge  → Enrich      │
     └──────────┬──────────┘     └──────────┬──────────┘
                |                           |
-               v                           v
-    ┌─────────────────────┐     ┌─────────────────────┐
-    │   AI Neo4j DB       │     │  Deal Neo4j DB      │
-    │   (NEO4J_*)         │     │  (DEAL_NEO4J_*)     │
-    └─────────────────────┘     └─────────────────────┘
+               └─────────────┬─────────────┘
+                             v
+                  ┌─────────────────────┐
+                  │   Shared Neo4j DB   │
+                  │   (NEO4J_URI)       │
+                  └─────────────────────┘
 ```
 
 Both pipelines receive the same `EnvelopeV1` and run concurrently. One pipeline failing never blocks or cancels the other. The `DispatcherResult` captures either a successful result or the exception from each pipeline independently.
@@ -42,30 +43,32 @@ See [docs/DEAL_SERVICE_ARCHITECTURE.md](./docs/DEAL_SERVICE_ARCHITECTURE.md) for
 
 ---
 
-## Two Separate Neo4j Databases
+## Single Shared Neo4j Database
 
-| Aspect | AI Database | Deal Database |
-|--------|-------------|---------------|
-| Env vars | `NEO4J_URI`, `NEO4J_PASSWORD` | `DEAL_NEO4J_URI`, `DEAL_NEO4J_PASSWORD` |
+Both pipelines write to the same Neo4j database instance. Label namespacing and schema ownership ensure isolation:
+
+| Aspect | ActionItem Pipeline | Deal Pipeline |
+|--------|---------------------|---------------|
+| Env vars | `NEO4J_URI` (fallback to `DEAL_NEO4J_URI`), `NEO4J_PASSWORD` | Same |
 | Client class | `Neo4jClient` | `DealNeo4jClient` |
 | Schema owner | `Neo4jClient.setup_schema()` | `DealNeo4jClient.setup_schema()` |
-| Node labels | Account, Interaction, ActionItem, ActionItemVersion, Owner, Topic, TopicVersion | Deal, DealVersion, Interaction, Account |
-| Constraints | 7 NODE KEY on `(tenant_id, id)` | Uniqueness on `(tenant_id, opportunity_id)`, etc. |
-| Vector indexes | 4 (ActionItem + Topic x embedding/embedding_current) | 2 (Deal x embedding/embedding_current) |
+| Node labels | Account, Interaction, ActionItem, ActionItemVersion, Owner, ActionItemTopic, ActionItemTopicVersion | Deal, DealVersion, Interaction, Account |
+| Constraints | UNIQUENESS on label-specific keys (e.g., `action_item_id`, `action_item_topic_id`) | UNIQUENESS on `(tenant_id, opportunity_id)`, etc. |
+| Vector indexes | 4 (ActionItem + ActionItemTopic x embedding/embedding_current) | 2 (Deal x embedding/embedding_current) |
 
-They share no data, connections, or driver instances.
+The shared labels (Account, Interaction) use defensive MERGE operations with `ON CREATE` / `ON MATCH` clauses to ensure idempotency when both pipelines write to the same nodes.
 
 ---
 
-## AI Database Graph Schema
+## Action Item Graph Schema
 
 ### Node Types
 
-All nodes include `tenant_id` for multi-tenancy isolation. Constraints enforce `(tenant_id, id) IS NODE KEY` on every label.
+All nodes include `tenant_id` for multi-tenancy isolation. Constraints enforce uniqueness on label-specific primary key properties.
 
 ```
 (:Account)
-  - id: string (primary key, e.g., "acct_acme_corp_001")
+  - account_id: string (primary key, e.g., "acct_acme_corp_001")
   - tenant_id: UUID
   - name: string
   - domain: string (optional)
@@ -73,7 +76,7 @@ All nodes include `tenant_id` for multi-tenancy isolation. Constraints enforce `
   - last_interaction_at: datetime
 
 (:Interaction)
-  - id: UUID (primary key)
+  - interaction_id: UUID (primary key)
   - tenant_id: UUID
   - account_id: string
   - interaction_type: enum (transcript, note, document, email, meeting)
@@ -87,7 +90,7 @@ All nodes include `tenant_id` for multi-tenancy isolation. Constraints enforce `
   - action_item_count: int
 
 (:ActionItem)
-  - id: UUID (primary key)
+  - action_item_id: UUID (primary key)
   - tenant_id: UUID
   - account_id: string
   - action_item_text: string (verbatim from transcript)
@@ -110,7 +113,7 @@ All nodes include `tenant_id` for multi-tenancy isolation. Constraints enforce `
   - invalidated_by: UUID (optional)
 
 (:ActionItemVersion)
-  - id: UUID (primary key)
+  - version_id: UUID (primary key)
   - action_item_id: UUID
   - tenant_id: UUID
   - version: int
@@ -126,7 +129,7 @@ All nodes include `tenant_id` for multi-tenancy isolation. Constraints enforce `
   - valid_until: datetime (optional)
 
 (:Owner)
-  - id: UUID (primary key)
+  - owner_id: UUID (primary key)
   - tenant_id: UUID
   - canonical_name: string
   - aliases: string[]
@@ -134,8 +137,8 @@ All nodes include `tenant_id` for multi-tenancy isolation. Constraints enforce `
   - user_id: string (optional)
   - created_at: datetime
 
-(:Topic)
-  - id: UUID (primary key)
+(:ActionItemTopic)
+  - action_item_topic_id: UUID (primary key)
   - tenant_id: UUID
   - account_id: string
   - name: string (display name, 3-5 words)
@@ -149,9 +152,9 @@ All nodes include `tenant_id` for multi-tenancy isolation. Constraints enforce `
   - created_from_action_item_id: UUID (provenance)
   - version: int
 
-(:TopicVersion)
-  - id: UUID (primary key)
-  - topic_id: UUID
+(:ActionItemTopicVersion)
+  - version_id: UUID (primary key)
+  - action_item_topic_id: UUID
   - tenant_id: UUID
   - version_number: int
   - name: string
@@ -161,12 +164,12 @@ All nodes include `tenant_id` for multi-tenancy isolation. Constraints enforce `
   - created_at: datetime
 ```
 
-### Relationships (AI DB)
+### Relationships
 
 ```
 (:Account)-[:HAS_INTERACTION]->(:Interaction)
 (:Account)-[:HAS_ACTION_ITEM]->(:ActionItem)
-(:Account)-[:HAS_TOPIC]->(:Topic)
+(:Account)-[:HAS_TOPIC]->(:ActionItemTopic)
 
 (:ActionItem)-[:EXTRACTED_FROM {is_source: bool, confidence: float}]->(:Interaction)
   # An ActionItem can be EXTRACTED_FROM multiple Interactions (grows over time)
@@ -179,33 +182,33 @@ All nodes include `tenant_id` for multi-tenancy isolation. Constraints enforce `
 (:ActionItem)-[:RELATED_TO]->(:ActionItem)
   # When items are semantically related but distinct
 
-(:ActionItem)-[:BELONGS_TO {confidence: float, method: string, created_at: datetime}]->(:Topic)
+(:ActionItem)-[:BELONGS_TO {confidence: float, method: string, created_at: datetime}]->(:ActionItemTopic)
   # method: "extracted" (from extraction), "resolved" (matched to existing), "manual"
 
-(:Topic)-[:HAS_VERSION {version_number: int}]->(:TopicVersion)
+(:ActionItemTopic)-[:HAS_VERSION {version_number: int}]->(:ActionItemTopicVersion)
 
 (:Contact)-[:PARTICIPATED_IN]->(:Interaction)
   # Contacts participate in interactions, NOT directly linked to ActionItems
 ```
 
-### Visual Schema (AI DB)
+### Visual Schema
 
 ```
                               ┌──────────┐
                               │ Account  │
                               └────┬─────┘
-           ┌──────────────────────┼──────────────────────┬────────────────┐
-           │                      │                      │                │
-           ▼                      ▼                      ▼                ▼
-    ┌─────────────┐        ┌───────────┐          ┌──────────┐     ┌─────────┐
-    │ Interaction │◄───────│ActionItem │─────────►│  Owner   │     │  Topic  │
-    └─────────────┘        └─────┬─────┘          └──────────┘     └────┬────┘
+           ┌──────────────────────┼──────────────────────┬────────────────────────┐
+           │                      │                      │                        │
+           ▼                      ▼                      ▼                        ▼
+    ┌─────────────┐        ┌───────────┐          ┌──────────┐     ┌──────────────────────┐
+    │ Interaction │◄───────│ActionItem │─────────►│  Owner   │     │  ActionItemTopic     │
+    └─────────────┘        └─────┬─────┘          └──────────┘     └────┬─────────────────┘
                                  │   │                                   │
                                  │   └───────────────BELONGS_TO──────────┘
                                  ▼                                       │
-                          ┌───────────────────┐                   ┌──────┴──────┐
-                          │ActionItemVersion  │                   │TopicVersion │
-                          └───────────────────┘                   └─────────────┘
+                          ┌───────────────────┐               ┌──────────┴──────────────┐
+                          │ActionItemVersion  │               │ActionItemTopicVersion   │
+                          └───────────────────┘               └─────────────────────────┘
 ```
 
 ---
@@ -278,34 +281,30 @@ Other associations use shared properties rather than graph edges (e.g., `Deal.ac
 
 ## Constraints & Indexes
 
-### AI Database
+### Action Item Schema (AI-owned labels)
 
 | Type | Name | Target |
 |------|------|--------|
-| NODE KEY | `account_tenant_key` | Account (tenant_id, id) |
-| NODE KEY | `interaction_tenant_key` | Interaction (tenant_id, id) |
-| NODE KEY | `action_item_tenant_key` | ActionItem (tenant_id, id) |
-| NODE KEY | `action_item_version_tenant_key` | ActionItemVersion (tenant_id, id) |
-| NODE KEY | `owner_tenant_key` | Owner (tenant_id, id) |
-| NODE KEY | `topic_tenant_key` | Topic (tenant_id, id) |
-| NODE KEY | `topic_version_tenant_key` | TopicVersion (tenant_id, id) |
+| UNIQUE | `action_item_unique` | ActionItem (tenant_id, action_item_id) |
+| UNIQUE | `action_item_version_unique` | ActionItemVersion (tenant_id, version_id) |
+| UNIQUE | `owner_unique` | Owner (tenant_id, owner_id) |
+| UNIQUE | `action_item_topic_unique` | ActionItemTopic (tenant_id, action_item_topic_id) |
+| UNIQUE | `action_item_topic_version_unique` | ActionItemTopicVersion (tenant_id, version_id) |
 | RANGE | `action_item_tenant_idx` | ActionItem (tenant_id) |
 | RANGE | `action_item_account_idx` | ActionItem (account_id) |
 | RANGE | `action_item_status_idx` | ActionItem (status) |
-| RANGE | `interaction_tenant_idx` | Interaction (tenant_id) |
-| RANGE | `interaction_account_idx` | Interaction (account_id) |
 | RANGE | `owner_tenant_idx` | Owner (tenant_id) |
-| RANGE | `topic_tenant_idx` | Topic (tenant_id) |
-| RANGE | `topic_account_idx` | Topic (account_id) |
-| RANGE | `topic_canonical_name_idx` | Topic (canonical_name) |
+| RANGE | `action_item_topic_tenant_idx` | ActionItemTopic (tenant_id) |
+| RANGE | `action_item_topic_account_idx` | ActionItemTopic (account_id) |
+| RANGE | `action_item_topic_canonical_name_idx` | ActionItemTopic (canonical_name) |
 | VECTOR | `action_item_embedding_idx` | ActionItem.embedding (1536d, cosine) |
 | VECTOR | `action_item_embedding_current_idx` | ActionItem.embedding_current (1536d, cosine) |
-| VECTOR | `topic_embedding_idx` | Topic.embedding (1536d, cosine) |
-| VECTOR | `topic_embedding_current_idx` | Topic.embedding_current (1536d, cosine) |
+| VECTOR | `action_item_topic_embedding_idx` | ActionItemTopic.embedding (1536d, cosine) |
+| VECTOR | `action_item_topic_embedding_current_idx` | ActionItemTopic.embedding_current (1536d, cosine) |
 
-NODE KEY enforces both **existence and uniqueness** of `(tenant_id, id)` — the strongest multi-tenancy guarantee available in Neo4j Enterprise.
+UNIQUENESS constraints ensure that label-specific primary keys are unique within each tenant. Shared labels (Account, Interaction) use skeleton constraints owned by upstream schema authority.
 
-### Deal Database
+### Deal Schema (Deal-owned labels)
 
 | Type | Name | Target |
 |------|------|--------|
@@ -315,7 +314,9 @@ NODE KEY enforces both **existence and uniqueness** of `(tenant_id, id)` — the
 | VECTOR | `deal_embedding_idx` | Deal.embedding (1536d, cosine) |
 | VECTOR | `deal_embedding_current_idx` | Deal.embedding_current (1536d, cosine) |
 
-Skeleton constraints on Deal, Interaction, and Account are expected to already exist (owned by upstream schema authority).
+### Shared Labels (Skeleton constraints)
+
+Skeleton constraints on Account and Interaction are owned by the upstream schema authority (`eq-structured-graph-core`). Both pipelines use defensive MERGE operations on these labels.
 
 ---
 
@@ -365,25 +366,28 @@ Deals use graduated thresholds:
 
 ## Multi-Tenancy & Account Scoping
 
-### AI Database Scoping
+### Scoping Rules
 
 | Node Type | tenant_id | account_id | Notes |
 |-----------|-----------|------------|-------|
 | Account | Required | N/A | Is the account |
 | Interaction | Required | Required | Scoped to account |
 | ActionItem | Required | Required | Scoped to account |
-| Topic | Required | Required | Scoped to account |
+| ActionItemTopic | Required | Required | Scoped to account |
 | Owner | Required | - | Tenant-level (shared across accounts) |
 | ActionItemVersion | Required | - | Historical record |
-| TopicVersion | Required | - | Historical record |
+| ActionItemTopicVersion | Required | - | Historical record |
+| Deal | Required | Required | Scoped to account |
+| DealVersion | Required | - | Historical record |
 
 ### Isolation Rules
 
 1. **tenant_id** is required on ALL nodes for complete data isolation
-2. **account_id** is required on transaction-level nodes (ActionItem, Topic, Interaction)
+2. **account_id** is required on transaction-level nodes (ActionItem, ActionItemTopic, Deal, Interaction)
 3. **Vector searches** filter by both tenant_id AND account_id to prevent cross-account bleeding
 4. **Owner nodes** are tenant-scoped (not account-scoped) to allow name resolution across accounts
 5. **Version nodes** inherit tenant_id from parent but don't need account_id (historical snapshots)
+6. **Shared labels** (Account, Interaction) are written defensively using MERGE with ON CREATE / ON MATCH to ensure idempotency across both pipelines
 
 ### Query Scoping
 
@@ -423,7 +427,7 @@ This enables:
 | Component | Technology |
 |-----------|------------|
 | Language | Python 3.10+ |
-| Graph Database | Neo4j Aura 5.x (Enterprise) — 2 separate instances |
+| Graph Database | Neo4j Aura 5.x (Enterprise) — single shared instance |
 | LLM | OpenAI GPT-4.1-mini (structured output) |
 | Embeddings | OpenAI text-embedding-3-small (1536 dims) |
 | Data Validation | Pydantic 2.x |

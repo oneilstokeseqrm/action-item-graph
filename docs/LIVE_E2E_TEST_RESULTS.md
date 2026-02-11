@@ -1,10 +1,10 @@
 # Live E2E Smoke Test Results
 
-**Run date**: 2026-02-03
+**Run date**: 2026-02-11
 **Script**: `scripts/run_live_e2e.py`
 **Account**: Lightbox (`aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa`)
 **Tenant**: `11111111-1111-4111-8111-111111111111`
-**Total wall-clock time**: 343,815 ms
+**Total wall-clock time**: 247,843 ms
 **Verdict**: ALL PIPELINES SUCCEEDED FOR ALL TRANSCRIPTS. Zero errors.
 
 > **Run variability**: This document is a point-in-time snapshot. Specific values
@@ -14,17 +14,21 @@
 > deal count, pipeline success/failure, constraint behavior, and structural
 > relationships.
 
-> **Two Neo4j databases**: The E2E test exercises two physically separate Neo4j Aura
-> instances — the **AI DB** (`NEO4J_URI`) for action items/topics and the **Deal DB**
-> (`DEAL_NEO4J_URI`) for deals/versions. They share no data, constraints, or
-> connections. See
-> [`DEAL_SERVICE_ARCHITECTURE.md`](./DEAL_SERVICE_ARCHITECTURE.md#two-separate-neo4j-databases)
-> for details.
+> **Single shared Neo4j database**: Both pipelines (Action Item + Deal) write to a
+> single shared Neo4j Aura instance. Shared labels (Account, Interaction) are
+> managed via defensive MERGE operations. AI-owned labels (ActionItem, ActionItemTopic,
+> Owner, etc.) use UNIQUENESS constraints with label-specific key properties.
+> See [`ARCHITECTURE.md`](../ARCHITECTURE.md) for the unified schema.
 
-**Changes since previous run:**
-- AI DB constraints upgraded from global single-property UNIQUENESS to tenant-scoped NODE KEY on `(tenant_id, id)` for all 7 active labels. Deal DB constraints NOT touched.
-- `_execute_merges` and `_process_topics` dict-keyed lookup replaced with 1:1 zip alignment to fix deterministic duplicate-text collision bug.
-- `create_action_item` MERGE now includes `tenant_id` in the match key for NODE KEY compatibility.
+**Changes since previous run (2026-02-03):**
+- **Graph integration**: Merged AI DB into shared structured DB — single database for both pipelines
+- **Label renames**: `Topic` → `ActionItemTopic`, `TopicVersion` → `ActionItemTopicVersion`
+- **Property renames**: Generic `id` → label-specific keys (`account_id`, `interaction_id`, `action_item_id`, `owner_id`, `action_item_topic_id`, `version_id`)
+- **Field renames**: `transcript_text` → `content_text`, `occurred_at` → `timestamp` (on Interaction)
+- **Constraint type**: NODE KEY → UNIQUENESS (matching structured DB convention)
+- **Interaction persistence**: CREATE → defensive MERGE with ON CREATE / ON MATCH
+- **Cleanup**: Label-scoped cleanup (respects upstream skeleton nodes in shared DB)
+- **New**: Cross-pipeline MERGE verification — proves both pipelines converge on shared Account/Interaction nodes
 
 ---
 
@@ -33,11 +37,10 @@
 | Setting | Value |
 |---------|-------|
 | Transcripts | 4 (sorted by sequence) |
-| AI DB | Neo4j Aura instance (`NEO4J_URI`) — Action Items, Topics, Owners, Interactions, Accounts |
-| Deal DB | Neo4j Aura instance (`DEAL_NEO4J_URI`) — Deals, DealVersions, Interactions, Accounts (**separate instance**) |
+| Database | Single shared Neo4j Aura instance (both pipelines) |
 | LLM | OpenAI (`gpt-4o-mini`) via structured output |
 | Embeddings | OpenAI `text-embedding-3-small` (1536-dim) |
-| Pre-run cleanup | Both DBs wiped for tenant before run |
+| Pre-run cleanup | Label-scoped wipe for pipeline-owned nodes (preserves upstream skeleton) |
 
 ---
 
@@ -45,15 +48,44 @@
 
 | Transcript | AI Items | Topics | Deals Created | Deals Merged | Both OK | Dispatch Time |
 |------------|----------|--------|---------------|--------------|---------|---------------|
-| Call 1 | 3 | 2 | 1 | 0 | Yes | 24,320 ms |
-| Call 2 | 12 | 5 | 0 | 1 | Yes | 81,276 ms |
-| Call 3 | 24 | 9 | 2 | 0 | Yes | 185,760 ms |
-| Call 4 — Follow-up Status Update | 6 | 1 | 0 | 0 | Yes | 50,978 ms |
-| **TOTAL** | **45** | **17** | **3** | **1** | | **342,334 ms** |
+| Call 1 | 3 | 2 | 1 | 0 | Yes | 21,046 ms |
+| Call 2 | 12 | 5 | 0 | 1 | Yes | 87,173 ms |
+| Call 3 | 9 | 7 | 2 | 0 | Yes | 80,809 ms |
+| Call 4 — Follow-up Status Update | 6 | 2 | 0 | 0 | Yes | 57,379 ms |
+| **TOTAL** | **30** | **16** | **3** | **1** | | **246,407 ms** |
 
 ---
 
-## 3. Identity Contract Evidence
+## 3. Cross-Pipeline MERGE Verification
+
+This section validates the core integration thesis: both pipelines converge on shared Account and Interaction nodes via MERGE, using the new label-specific key properties.
+
+### 3.1 Account Convergence
+
+| Check | Result |
+|-------|--------|
+| Account nodes for `account_id=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa` | **1** (MERGE convergence confirmed) |
+| `account_id` property present | Yes |
+| `tenant_id` property present | Yes |
+
+Both pipelines MERGE on `{account_id: $account_id, tenant_id: $tenant_id}`. A single Account node confirms no duplication.
+
+### 3.2 Interaction Convergence
+
+Each Interaction node is enriched by **both** pipelines: `action_item_count` (AI pipeline) and `deal_count` (Deal pipeline) on the same node.
+
+| Transcript | Interaction ID | action_item_count | deal_count | has_content | has_timestamp | Result |
+|------------|---------------|-------------------|------------|-------------|---------------|--------|
+| Call 1 | `e44526c5-e13b-443a-abee-4ce8ff5dbff0` | 3 | 1 | Yes | Yes | PASS |
+| Call 2 | `3e01308d-e05e-4d50-80f3-388db239cfc3` | 12 | 1 | Yes | Yes | PASS |
+| Call 3 | `c4cf76e5-761f-4d8b-8279-41d29b5e50df` | 9 | 2 | Yes | Yes | PASS |
+| Call 4 | `f17595bd-33b2-4ad2-a926-24f67e1ea455` | 6 | 0 | Yes | Yes | PASS |
+
+**4/4 interactions enriched by both pipelines. ALL CHECKS PASSED.**
+
+---
+
+## 4. Identity Contract Evidence
 
 ### opportunity_id
 
@@ -72,269 +104,175 @@ All Deal `opportunity_id` values are UUIDv7 (RFC 9562), minted by `deal_graph.ut
 deal_ref = "deal_" + opportunity_id.hex[-16:]
 ```
 
-The last 16 hex chars (64 bits) come from the random portion of UUIDv7, providing collision resistance even for deals created within the same millisecond. This is a display-only alias — never used for identity, matching, or keys.
-
 | Deal | opportunity_id | deal_ref | Unique? |
 |------|---------------|----------|---------|
-| AML | `019c2362-1cd5-7fd1-9744-82bda3f94901` | `deal_974482bda3f94901` | Yes |
-| IDR | `019c2363-da05-7e93-9076-8972a00e0051` | `deal_90768972a00e0051` | Yes |
-| EDP | `019c2363-f567-74b2-967b-2325ddb5f3a5` | `deal_967b2325ddb5f3a5` | Yes |
-
-Note: The IDR and EDP deals were created in the same transcript (Call 3) within milliseconds. The first 8 hex chars of their opportunity_ids overlap (`019c2363`), but the `deal_ref` values are distinct because they derive from the random tail.
+| AML | `019c4e77-a2d2-7731-a01d-d339bbc80bcb` | `deal_a01dd339bbc80bcb` | Yes |
+| IDR | `019c4e79-74ce-7061-a4bc-da0994772a7f` | `deal_a4bcda0994772a7f` | Yes |
+| EDP | `019c4e79-8908-7a82-84a9-f1626b3b1f5f` | `deal_84a9f1626b3b1f5f` | Yes |
 
 ---
 
-## 4. Deal Database — Final State
+## 5. Deal Pipeline — Final State
 
-### 4.1 Deals (3)
+### 5.1 Deals (3)
 
 #### Deal 1: Lightbox Application Modernization Lab Engagement
 
 | Property | Value |
 |----------|-------|
-| opportunity_id | `019c2362-1cd5-7fd1-9744-82bda3f94901` |
-| deal_ref | `deal_974482bda3f94901` |
+| opportunity_id | `019c4e77-a2d2-7731-a01d-d339bbc80bcb` |
+| deal_ref | `deal_a01dd339bbc80bcb` |
 | Stage | `qualification` |
 | Amount | $497,000 USD |
 | Version | 2 (created in Call 1, merged in Call 2) |
 | MEDDIC Completeness | 100% (6/6) |
 
-**MEDDIC Profile:**
-
-| Dimension | Value |
-|-----------|-------|
-| Metrics | Cost neutrality via service credits if four weeks of the lab are completed in Q4; workloads must have at least $1M ARR in EC2 Windows or SQL Server to qualify |
-| Economic Buyer | Eric (CTO) and engineering leaders such as Ron, as they are suggested key stakeholders for decision-making authority |
-| Decision Criteria | Flexibility of AML scope (infrastructure vs application-level modernization); workloads must qualify by ARR threshold |
-| Decision Process | Engaging engineering leaders (Eric, Ron, others) for discussion; initial technical discovery phase (free) followed by four-week intensive lab |
-| Identified Pain | Need to modernize application infrastructure (EC2 Windows, SQL Server workloads) to reduce costs and improve scalability |
-| Champion | Peter (internal contact coordinating discussions) and Jackie (AWS advocate presenting Q4 special offer) |
-
-**Summary:** Lightbox is exploring AWS's invite-only Application Modernization Lab (AML) program to modernize their EC2 Windows and SQL Server workloads.
-
----
-
-#### Deal 2: Incident Detection and Response (IDR) Support Service for Lightbox
+#### Deal 2: Incident Detection and Response (IDR) Service Adoption
 
 | Property | Value |
 |----------|-------|
-| opportunity_id | `019c2363-da05-7e93-9076-8972a00e0051` |
-| deal_ref | `deal_90768972a00e0051` |
+| opportunity_id | `019c4e79-74ce-7061-a4bc-da0994772a7f` |
+| deal_ref | `deal_a4bcda0994772a7f` |
 | Stage | `qualification` |
 | Amount | $58,000 USD |
 | Version | 1 (created in Call 3) |
 | MEDDIC Completeness | 100% (6/6) |
 
-**MEDDIC Profile:**
-
-| Dimension | Value |
-|-----------|-------|
-| Metrics | Potential cost savings from reduced downtime and faster incident resolution; improved operational efficiency with 5-minute response SLA |
-| Economic Buyer | David (likely financial decision maker), John (incident manager), Brandon (team member involved in decision) |
-| Decision Criteria | Integration with existing alarm systems (New Relic, Dynatrace, Datadog) via Amazon EventBridge; must provide proactive detection within 5 minutes |
-| Decision Process | Initial refresher and proposal presentation; discussion of pricing and contract terms; scheduling follow-up with AWS MAP specialist |
-| Identified Pain | Current reactive support leads to slower incident resolution and operational inefficiency due to sequential issue identification |
-| Champion | Peter (AWS account manager), Maya (AWS support specialist), Greg (Lightbox contact and internal advocate) |
-
-**Summary:** Lightbox is evaluating AWS's Incident Detection and Response (IDR) service to improve proactive support with 5-minute response SLA.
-
----
-
-#### Deal 3: Lightbox AWS Enterprise Discount Program (EDP) Renewal and Forecasting
+#### Deal 3: Enterprise Discount Program (EDP) Renewal and Forecasting
 
 | Property | Value |
 |----------|-------|
-| opportunity_id | `019c2363-f567-74b2-967b-2325ddb5f3a5` |
-| deal_ref | `deal_967b2325ddb5f3a5` |
-| Stage | `proposal` |
-| Amount | $7,150,000 USD |
+| opportunity_id | `019c4e79-8908-7a82-84a9-f1626b3b1f5f` |
+| deal_ref | `deal_84a9f1626b3b1f5f` |
+| Stage | `negotiation` |
+| Amount | $37,150,000 USD |
 | Version | 1 (created in Call 3) |
 | MEDDIC Completeness | 100% (6/6) |
 
-**MEDDIC Profile:**
+**Amount provenance note:** All amounts are LLM-normalized estimates derived from transcript context. These are not CRM-sourced figures.
 
-| Dimension | Value |
-|-----------|-------|
-| Metrics | Forecasted AWS spend commitment of approximately $7.15 million for 2024 with 3% growth |
-| Economic Buyer | Greg (influencer), David (likely financial decision maker), John (incident manager), legal team, Brandon |
-| Decision Criteria | Accurate forecasting to avoid shortfalls; contract terms consistent with previous agreements; conservative growth assumptions |
-| Decision Process | Internal forecasting and spreadsheet analysis; discussions between AWS and Lightbox account management |
-| Identified Pain | Risk of financial shortfalls and accounting complexities if forecasts are inaccurate; need to balance growth projections with contractual obligations |
-| Champion | Peter (AWS account manager), Greg (Lightbox contact), David (financial decision maker) |
-
-**Summary:** Lightbox is negotiating the renewal of their AWS Enterprise Discount Program (EDP) with a forecasted ~$7.15M commitment.
-
-**Amount provenance note:** All amounts are LLM-normalized estimates derived from transcript context. The AML figure ($497K) reflects the LLM's interpretation of discussed cost parameters. The EDP figure ($7.15M) reflects the annual commitment discussed in the transcript. The IDR figure ($58K) is the annualized cost estimate from the transcript discussion. These are not CRM-sourced figures.
-
----
-
-### 4.2 DealVersions (1)
+### 5.2 DealVersions (1)
 
 One version snapshot was created when the AML deal was merged in Call 2:
 
 | Property | Value |
 |----------|-------|
-| deal_opportunity_id | `019c2362-1cd5-7fd1-9744-82bda3f94901` |
+| deal_opportunity_id | `019c4e77-a2d2-7731-a01d-d339bbc80bcb` |
 | version | 1 (snapshot of pre-merge state) |
-| changed_fields | `opportunity_summary`, `evolution_summary`, `meddic_economic_buyer`, `meddic_decision_criteria`, `meddic_decision_process`, `meddic_identified_pain`, `meddic_champion` |
-| change_summary | The update introduced a Q4 special offer for cost neutrality contingent on completing four weeks of the lab |
-
-All `changed_fields` values pass through `BARE_TO_PREFIXED` normalization and `DEAL_PROPERTY_WHITELIST` filtering — no meta-fields (e.g., `change_narrative`, `stage_reasoning`) leak into the list.
+| changed_fields | `meddic_economic_buyer`, `meddic_decision_criteria`, `meddic_decision_process`, `meddic_identified_pain`, `meddic_champion`, `meddic_metrics`, `opportunity_summary`, `evolution_summary` |
 
 ---
 
-### 4.3 Interactions — Deal DB (4)
+## 6. AI Pipeline — Final State
 
-The Deal pipeline's stage 0 creates Account and Interaction nodes in the Deal DB via `repository.verify_account()` and `repository.ensure_interaction()`. After processing, `enrich_interaction()` stamps `deal_count` and `processed_at`.
+### 6.1 Action Items (30)
 
-**Incremental verification (per-transcript Deal DB check):**
+| # | Summary | Owner | Topic |
+|---|---------|-------|-------|
+| 1 | Ensure session recording is captured and shared | E | Meeting Recording And Sharing |
+| 2 | Start meeting recording and share afterwards | E | Meeting Recording And Sharing |
+| 3 | Share business case tool outputs and materials | B | Application Modernization Lab Engagement |
+| 4 | Share business case tool outputs (follow-up) | B | Follow-up Status Update |
+| 5 | Track down remaining VMware credit memos | Peter | Credit Memo Reconciliation |
+| 6 | Clarify VMC credit memo handling | Peter | Credit Memo Reconciliation |
+| 7 | Provide scoping clarifications and Q4 offer | Jackie Rusk | Application Modernization Lab Engagement |
+| 8 | Provide scoping clarifications (follow-up) | Jackie Rusk | Follow-up Status Update |
+| 9 | Set up meeting with Eric, Ron for AML | Peter | Application Modernization Lab Engagement |
+| 10 | Resend Aurora MySQL upgrade list | Alejandro Torres | Database Upgrade Planning |
+| 11 | Inform when Livebox app ready for arch review | Alejandro Torres | Livebox Application Migration |
+| 12 | Schedule arch review around Thanksgiving | Rob | Livebox Application Migration |
+| 13 | Accommodate earlier scheduling if ready | Alejandro Torres | Livebox Application Migration |
+| 14 | AWS backup conversation rescheduled for Monday | Alejandro Torres | AWS Backup Strategy Discussion |
+| 15 | Inform Chris about key rotation resolution | Alejandro Torres | Security Key Rotation Communication |
+| 16 | Send list of RDS databases without backups | Alejandro Torres | AWS Backup Strategy Discussion |
+| 17 | Send RDS backup list (follow-up) | Alejandro Torres | Follow-up Status Update |
+| 18 | Review credit memos Greg mentioned | Alejandro Torres | Credit Memo Reconciliation |
+| 19 | Open support case for Mac VPN issues | David | AWS Client VPN Support |
+| 20 | Open support case for account migration | David | AWS Account Migration Issues |
+| 21 | Follow up on RDS Postgres issues | Greg | RDS Postgres Issue Resolution |
+| 22 | Provide times for Bedrock team meetings | Greg | Application Modernization Lab Engagement |
+| 23 | Provide times for Bedrock meetings | Greg | Bedrock Team Coordination |
+| 24 | Monitor VPN and account migration cases | F | AWS Account Migration Issues |
+| 25 | Arrange Zoom for DevOps Guru | E | DevOps Guru Coordination |
+| 26 | Distribute meeting notes | F | Meeting Recording And Sharing |
+| 27 | Follow up on IDR service trial interest | C | Incident Detection and Response Evaluation |
+| 28 | Seek internal approvals for EDP renewal | Peter | EDP Renewal Approval Process |
+| 29 | Prepare engineering priorities proposal | Peter | Application Modernization Lab Engagement |
+| 30 | Take over DevOps Guru setup from E | C | DevOps Environment Setup |
 
-Each verification queries the exact `interaction_id` generated for that transcript — no reliance on DB ordering.
-
-| After Transcript | Accounts | Interactions | Interaction ID | deal_count | processed |
-|-----------------|----------|--------------|----------------|------------|-----------|
-| Call 1 | 1 | 1 | `1416f175-858a-4d8b-b86b-49a11e643135` | 1 | Yes |
-| Call 2 | 1 | 2 | `7208b421-404b-4eb9-a8e7-ee23cdcb4510` | 1 | Yes |
-| Call 3 | 1 | 3 | `5f5bea24-5080-4d65-a9a3-f1b89d0b6851` | 2 | Yes |
-| Call 4 | 1 | 4 | `e0323e69-385d-4b02-bea8-7fe7370c5ecf` | 0 | Yes |
-
-**deal_count per Interaction (final state, queried by exact ID in transcript sequence):**
-
-| Transcript | Interaction ID | deal_count | Explanation |
-|------------|---------------|------------|-------------|
-| Call 1 | `1416f175-858a-4d8b-b86b-49a11e643135` | 1 | Created AML deal |
-| Call 2 | `7208b421-404b-4eb9-a8e7-ee23cdcb4510` | 1 | Merged into existing AML deal |
-| Call 3 | `5f5bea24-5080-4d65-a9a3-f1b89d0b6851` | 2 | Created IDR + EDP deals |
-| Call 4 | `e0323e69-385d-4b02-bea8-7fe7370c5ecf` | 0 | Status update only — no deals extracted |
-
-All interactions have `interaction_type=transcript` and `processed=Yes`. Interaction IDs are the exact UUIDs generated per envelope — matched by primary key, not by query ordering.
-
----
-
-## 5. AI Database — Final State
-
-### 5.1 Action Items (45)
-
-The action item table below is truncated for readability; totals reflect the full run.
-
-| # | Summary | Owner | Topic | Source |
-|---|---------|-------|-------|--------|
-| 1 | Ensure session recording is captured and shared with the team | E | Meeting Recording And Sharing | Call 1 |
-| 2 | Present the Application Modernization Lab program details | B | Application Modernization Lab Overview | Call 1 |
-| 3 | Explain the timing of cash flows and service credits | B | Application Modernization Lab Overview | Call 1 |
-| 4 | Share AML program materials and payment stream Excel | B | Application Modernization Lab Overview | Call 1 |
-| 5 | Share AML business case tool outputs for optimization | B | Application Modernization Lab Overview | Call 1 |
-| 6 | Share alternative training course options | B | Application Modernization Lab Overview | Call 1 |
-| 7 | Identify which workloads AML should focus on | B | Application Modernization Lab Overview | Call 1 |
-| 8 | Share all reviewed materials (call deck, business case tool, workload worksheet) | B | Application Modernization Lab Overview | Call 1, Call 4 |
-| 9 | Track down status of remaining credit memos | Peter | Credit Memo Reconciliation | Call 2 |
-| 10 | Provide scoping clarifications and Q4 special offer | Jackie | Application Modernization Lab Overview | Call 2, Call 4 |
-| 11 | Set up meeting with Eric, Ron to discuss AML | Peter | Application Modernization Lab Overview | Call 2 |
-| 12 | Resend Aurora MySQL databases needing upgrade | Alejandro | Database Upgrade Compliance | Call 2 |
-| 13 | Inform when Livebox app ready for arch review | Alejandro | Livebox Application Migration | Call 2 |
-| 14 | Schedule arch review around Thanksgiving | Rob | Livebox Application Migration | Call 2 |
-| 15 | Notify if Livebox migration finishes early | Alejandro | Livebox Application Migration | Call 2 |
-| 16 | AWS backup conversation rescheduled for Monday | Alejandro | AWS Backup Strategy Discussion | Call 2 |
-| 17 | Inform Chris about key rotation incident | Alejandro | Security Key Rotation Communication | Call 2 |
-| 18 | Send list of RDS databases without backups | Alejandro | AWS Backup Strategy Discussion | Call 2, Call 4 |
-| 19 | Review credit memos Greg mentioned | Peter | Credit Memo Reconciliation | Call 2 |
-| 20 | Open support case for Mac client VPN issues | David | AWS Client VPN Support | Call 3 |
-| 21 | Open support case for account migration into Lightbox org | David | Account Migration Support | Call 3 |
-| 22 | Follow up on RDS Postgres issues, email Leo | Greg | RDS Postgres Issue Resolution | Call 3 |
-| 23 | Provide available times for Bedrock team meetings | Greg | Bedrock Team Coordination | Call 3, Call 4 |
-| 24 | Follow-up discussion on the EDP | Peter | EDP Renewal Discussion | Call 3 |
-| 25 | Monitor progress on VPN and account migration cases | F | Account Migration Support | Call 3 |
-| 26 | Coordinate scheduling and provide RDS statistics | Greg | Bedrock Team Coordination | Call 3 |
-| 27 | Arrange Zoom meeting for DevOps Guru project | E | DevOps Guru Coordination | Call 3 |
-| 28 | Schedule call with MAP specialist for migration projects | Alejandro | MAP Discount Coordination | Call 3 |
-| 29 | Verify MAP renewal impacts and timing | Alejandro | MAP Discount Coordination | Call 3 |
-| 30 | Determine team members for MAP specialist call | Brandon | MAP Discount Coordination | Call 3 |
-| 31 | Lead MAP specialist meeting and coordinate participants | H | MAP Discount Coordination | Call 3 |
-| 32 | Follow up on IDR service trial interest | Cedar | Incident Detection and Response Adoption | Call 3 |
-| 33 | Distribute meeting notes to all attendees | F | Meeting Recording And Sharing | Call 3 |
-| 34 | Prepare proposal for engineering priorities alignment | Peter | Application Modernization Lab Overview | Call 4 |
-| 35 | Take over DevOps Guru environment setup from E | C | DevOps Guru Environment Setup | Call 4 |
-
-### 5.2 Topics (17)
+### 6.2 Topics (16)
 
 | Topic | Action Items |
 |-------|-------------|
-| Application Modernization Lab Engagement | 4 |
-| Bedrock Team Coordination | 4 |
-| Follow-up Status Update | 4 |
-| MAP Specialist Coordination | 4 |
-| AWS Account Migration | 3 |
+| Application Modernization Lab Engagement | 5 |
+| Follow-up Status Update | 3 |
 | Credit Memo Reconciliation | 3 |
 | Livebox Application Migration | 3 |
-| Meeting Recording and Sharing | 3 |
-| RDS Postgres Issue Resolution | 3 |
+| Meeting Recording And Sharing | 3 |
+| AWS Account Migration Issues | 2 |
 | AWS Backup Strategy Discussion | 2 |
-| AWS VPN Client Support | 2 |
-| DevOps Guru Setup | 2 |
-| EDP Renewal Discussions | 3 |
-| Haters Backup Meeting | 2 |
+| AWS Client VPN Support | 1 |
+| Bedrock Team Coordination | 1 |
 | Database Upgrade Planning | 1 |
-| GPU Migration Support | 1 |
+| DevOps Environment Setup | 1 |
+| DevOps Guru Coordination | 1 |
+| EDP Renewal Approval Process | 1 |
+| Incident Detection and Response Evaluation | 1 |
+| RDS Postgres Issue Resolution | 1 |
 | Security Key Rotation Communication | 1 |
 
-**Topic coverage**: 45/45 action items (100%) have a topic assignment.
+**Topic coverage**: 30/30 action items (100%) have a topic assignment.
 
-### 5.3 Owners (7)
+### 6.3 Owners (5)
 
 | Owner | Action Items |
 |-------|-------------|
-| E | 17 |
-| G | 8 |
-| David | 7 |
-| F | 4 |
-| H | 3 |
+| E | 18 |
 | B | 2 |
-| C | 1 |
+| David | 2 |
+| F | 2 |
+| C | 2 |
 
 ---
 
-## 6. Aggregate Statistics
+## 7. Aggregate Statistics
 
-| Metric | AI DB | Deal DB |
-|--------|-------|---------|
-| Action Items / Deals | 45 | 3 |
-| Topics / DealVersions | 17 | 1 |
-| Owners | 7 | — |
-| Interactions | 4 | 4 |
-| Items with Topics | 45/45 (100%) | — |
-| Errors | 0 | 0 |
+| Metric | Value |
+|--------|-------|
+| Action Items | 30 |
+| ActionItemTopics | 16 |
+| Owners | 5 |
+| Deals | 3 |
+| DealVersions | 1 |
+| Interactions | 4 (shared, enriched by both pipelines) |
+| Accounts | 1 (shared, MERGE convergence verified) |
+| Items with Topics | 30/30 (100%) |
+| Errors | 0 |
 
 ---
 
-## 7. ActionItem Idempotency + Duplicate-Text Fix
+## 8. Schema & Constraints
 
-Prior to this run, the AI pipeline had two related issues with duplicate-text action items:
+### AI-owned labels (UNIQUENESS constraints)
 
-**Issue 1 — DB-level:** `create_action_item()` used `CREATE` which failed on the second write when the same UUID was passed twice.
-**Fix:** Changed to `MERGE (ai:ActionItem {id: $id, tenant_id: $tenant_id}) ON CREATE SET ai += $props`. The second write is now a no-op. The MERGE key includes `tenant_id` for NODE KEY compatibility.
+| Constraint | Label | Properties |
+|-----------|-------|------------|
+| `action_item_unique` | ActionItem | `(tenant_id, action_item_id)` |
+| `action_item_version_unique` | ActionItemVersion | `(tenant_id, version_id)` |
+| `owner_unique` | Owner | `(tenant_id, owner_id)` |
+| `action_item_topic_unique` | ActionItemTopic | `(tenant_id, action_item_topic_id)` |
+| `action_item_topic_version_unique` | ActionItemTopicVersion | `(tenant_id, version_id)` |
 
-**Issue 2 — Code-level (root cause):** `pipeline.py:_execute_merges()` used a dict keyed by `action_item_text` (`{ai.action_item_text: ai}`) to correlate `MatchResult` → `ActionItem`. When two extracted items had identical text, the second silently overwrote the first, causing both match results to resolve to the same `ActionItem` (same UUID). The same bug existed in `_process_topics()` via `text_to_id` dict.
-**Fix:** Both methods replaced with 1:1 positional alignment (`zip(match_results, action_items)`) — structurally incapable of collision. `_match_extractions()` now returns `tuple[list[MatchResult], list[ActionItem]]`, preserving the filtered action items alongside match results.
+### Deal-owned labels
 
-## 8. Tenant-Scoped Constraint Upgrade (AI DB Only)
+| Constraint | Label | Properties |
+|-----------|-------|------------|
+| `dealversion_unique` | DealVersion | `(tenant_id, version_id)` |
+| `deal_unique_v2` | Deal | `(tenant_id, opportunity_id)` |
 
-AI DB constraints upgraded from global single-property UNIQUENESS to composite NODE KEY on `(tenant_id, id)` for all 7 active labels:
+### Shared labels (skeleton-owned)
 
-| Constraint | Label |
-|-----------|-------|
-| `account_tenant_key` | Account |
-| `interaction_tenant_key` | Interaction |
-| `action_item_tenant_key` | ActionItem |
-| `action_item_version_tenant_key` | ActionItemVersion |
-| `owner_tenant_key` | Owner |
-| `topic_tenant_key` | Topic |
-| `topic_version_tenant_key` | TopicVersion |
-
-NODE KEY enforces both existence and uniqueness of `(tenant_id, id)` — the strongest multi-tenancy guarantee available in Neo4j Enterprise.
-
-**Migration strategy:** New composite constraints created first, then 7 legacy single-property constraints dropped (one per AI-owned label). Only labels managed by the Action Item pipeline are affected.
-
-**Deal DB:** NOT touched. `DealNeo4jClient` connects to a separate Neo4j instance (`DEAL_NEO4J_URI`) and has its own `setup_schema()` override.
+Account and Interaction constraints are owned by upstream `eq-structured-graph-core`. Both pipelines use defensive MERGE on these labels.
 
 ---
 
@@ -342,23 +280,22 @@ NODE KEY enforces both existence and uniqueness of `(tenant_id, id)` — the str
 
 - [x] All 4 transcripts processed — both pipelines succeeded for every call
 - [x] Both OK = Yes for all 4 transcripts (zero errors)
+- [x] **Cross-pipeline MERGE**: 1 Account node (no duplicates from two pipelines)
+- [x] **Cross-pipeline MERGE**: 4/4 Interactions enriched by both pipelines
+- [x] `account_id` property present on Account node (label-specific key)
+- [x] `interaction_id` property present on Interaction nodes (label-specific key)
+- [x] `content_text` and `timestamp` properties present on Interaction nodes
 - [x] `opportunity_id` is UUIDv7 (parseable, `.version == 7`)
 - [x] No `deal_` prefix in canonical `opportunity_id`
 - [x] `deal_ref` derived from random tail (`hex[-16:]`), all 3 distinct
 - [x] `changed_fields` normalized: bare MEDDIC names mapped, meta-fields filtered
-- [x] All timestamps UTC-aware (`grep -rn 'datetime.now()' src/deal_graph/` = 0 hits)
-- [x] Deal DB: Accounts=1, Interactions=4 (incremented 1→2→3→4)
-- [x] Deal DB: Deals=3, DealVersions=1
+- [x] Deals=3, DealVersions=1
 - [x] deal_count evidence: Call 1→1, Call 2→1, Call 3→2, Call 4→0
 - [x] Interaction IDs matched by exact primary key (no ordering dependency)
-- [x] No schema mismatch warnings in Deal DB queries
-- [x] AI DB constraints: 7 NODE KEY on (tenant_id, id) — all legacy constraints dropped
-- [x] Deal DB constraints: NOT touched (separate client, separate instance)
-- [x] `_execute_merges` uses 1:1 zip alignment — no dict-keyed collision possible
-- [x] `_process_topics` uses 1:1 zip alignment — same fix
-- [x] `create_action_item` MERGE includes `tenant_id` in match key
-- [x] Duplicate-text regression test: `tests/test_duplicate_text.py` (3 tests, all pass)
+- [x] All `:Topic` labels → `:ActionItemTopic` in Cypher (zero stale references in source)
+- [x] All generic `{id:` → label-specific keys in Cypher (zero stale references in source)
+- [x] UNIQUENESS constraints (not NODE KEY) for AI-owned labels
+- [x] Label-scoped cleanup preserves upstream skeleton nodes (2711 nodes untouched)
 - [x] No CRM/Salesforce references in pipeline prompts
-- [x] Unit tests: 266 passed, 0 failed (count as of 2026-02-03; may change as tests are added)
-- [x] AI pipeline: ActionItem persistence idempotent (MERGE on node key)
-- [x] AI pipeline: 35 items, 16 topics, 100% topic coverage
+- [x] Unit tests: 266 passed, 0 failed
+- [x] AI pipeline: 30 items, 16 topics, 100% topic coverage

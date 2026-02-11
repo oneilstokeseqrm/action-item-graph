@@ -31,18 +31,18 @@ The system runs **two pipelines concurrently** via `EnvelopeDispatcher`:
                       /            \
                      /              \
         ActionItemPipeline      DealPipeline
-          (AI Database)        (Deal Database)
+          (Shared Database)    (Shared Database)
 ```
 
-Each pipeline writes to a **physically separate Neo4j AuraDB instance** — they share no data, constraints, or connections. A shared `OpenAIClient` handles LLM extraction and embedding generation for both.
+Both pipelines write to a **single shared Neo4j AuraDB instance** using tenant-scoped isolation. A shared `OpenAIClient` handles LLM extraction and embedding generation for both.
 
-| Component | AI Database | Deal Database |
-|-----------|-------------|---------------|
-| **Instance** | `NEO4J_URI` | `DEAL_NEO4J_URI` |
-| **Node Labels** | Account, Interaction, ActionItem, ActionItemVersion, Owner, Topic, TopicVersion | Account, Interaction, Deal, DealVersion |
-| **Constraints** | 7 NODE KEY on (tenant_id, id) | Uniqueness on opportunity_id, interaction_id |
-| **Vector Indexes** | 4 (ActionItem + Topic, original + current) | 2 (Deal original + current) |
-| **Embedding Dimensions** | 1536 (text-embedding-3-small) | 1536 (text-embedding-3-small) |
+| Component | Shared Database |
+|-----------|-----------------|
+| **Instance** | `NEO4J_URI` |
+| **Node Labels** | Account, Interaction, ActionItem, ActionItemVersion, Owner, ActionItemTopic, ActionItemTopicVersion, Deal, DealVersion |
+| **Constraints** | NODE KEY on (tenant_id, label-specific ID) for all entity labels |
+| **Vector Indexes** | 6 (ActionItem + ActionItemTopic + Deal, original + current for each) |
+| **Embedding Dimensions** | 1536 (text-embedding-3-small) |
 
 ---
 
@@ -54,53 +54,37 @@ Each pipeline writes to a **physically separate Neo4j AuraDB instance** — they
 # OpenAI (shared by both pipelines)
 OPENAI_API_KEY=sk-...
 
-# AI Database (Action Items, Topics, Owners)
+# Shared Database (Action Items, Topics, Owners, Deals, DealVersions)
 NEO4J_URI=neo4j+s://xxxxx.databases.neo4j.io
 NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=<password>
 NEO4J_DATABASE=neo4j
-
-# Deal Database (Deals, DealVersions)
-DEAL_NEO4J_URI=neo4j+s://yyyyy.databases.neo4j.io
-DEAL_NEO4J_USERNAME=neo4j
-DEAL_NEO4J_PASSWORD=<password>
 ```
 
 ### Schema Provisioning
 
-Both databases must have their schema provisioned before testing. Schema setup is **idempotent** (`IF NOT EXISTS` on all DDL).
+The shared database must have its schema provisioned before testing. Schema setup is **idempotent** (`IF NOT EXISTS` on all DDL).
 
 **Option A — Programmatic (recommended):**
 
 Schema is created automatically when `setup_schema()` is called at pipeline startup. The live E2E script calls this before processing:
 
 ```python
-await ai_neo4j.connect()
-await ai_neo4j.setup_schema()       # 7 constraints + 9 indexes + 4 vector indexes
-
-await deal_neo4j.connect()
-await deal_neo4j.setup_schema()     # constraints + indexes + 2 vector indexes
+await neo4j.connect()
+await neo4j.setup_schema()       # All constraints + indexes + vector indexes
 ```
 
 **Option B — Manual via MCP or Cypher:**
 
-If provisioning a fresh AuraDB instance (e.g., after free-tier reset), run the DDL directly. See [`neo4j_client.py:setup_schema()`](../src/action_item_graph/clients/neo4j_client.py) and [`deal_graph/clients/neo4j_client.py:setup_schema()`](../src/deal_graph/clients/neo4j_client.py) for the exact statements.
+If provisioning a fresh AuraDB instance (e.g., after free-tier reset), run the DDL directly. See [`neo4j_client.py:setup_schema()`](../src/action_item_graph/clients/neo4j_client.py) for the exact statements.
 
-**AI Database schema (20 total DDL statements):**
+**Shared Database schema:**
 
 | Type | Count | Details |
 |------|-------|---------|
-| NODE KEY constraints | 7 | `(tenant_id, id)` on Account, Interaction, ActionItem, ActionItemVersion, Owner, Topic, TopicVersion |
-| Property indexes | 9 | `tenant_id`, `account_id`, `status`, `canonical_name` across labels |
-| Vector indexes | 4 | `ActionItem.embedding`, `ActionItem.embedding_current`, `Topic.embedding`, `Topic.embedding_current` (1536d, cosine) |
-
-**Deal Database schema:**
-
-| Type | Details |
-|------|---------|
-| Uniqueness constraints | `opportunity_id` on Deal, `interaction_id` on Interaction |
-| Property indexes | `tenant_id`, `account_id`, `stage` on Deal; `tenant_id` on Interaction |
-| Vector indexes | `Deal.embedding` + `Deal.embedding_current` (1536d, cosine) |
+| NODE KEY constraints | Multiple | `(tenant_id, label_id)` on Account, Interaction, ActionItem, ActionItemVersion, Owner, ActionItemTopic, ActionItemTopicVersion, Deal, DealVersion |
+| Property indexes | Multiple | `tenant_id`, `account_id`, `status`, `canonical_name`, `stage` across labels |
+| Vector indexes | 6 | `ActionItem.embedding`, `ActionItem.embedding_current`, `ActionItemTopic.embedding`, `ActionItemTopic.embedding_current`, `Deal.embedding`, `Deal.embedding_current` (1536d, cosine) |
 
 ---
 
@@ -138,26 +122,30 @@ The script executes these phases in order:
 
 #### Phase 1: Setup
 1. Loads 4 transcripts from `examples/transcripts/transcripts.json`
-2. Connects to both Neo4j instances and runs `setup_schema()`
-3. **Cleans both databases** — deletes all nodes for the test tenant (tenant-scoped, no impact on other tenants)
+2. Connects to Neo4j and runs `setup_schema()`
+3. **Cleans the database** — deletes all nodes for the test tenant (tenant-scoped, no impact on other tenants)
 
 #### Phase 2: Sequential Transcript Processing (Both Pipelines Per Transcript)
 For each of the 4 transcripts (in sequence order):
 
 1. Builds an `EnvelopeV1` with a fresh `interaction_id` (UUID4)
 2. Dispatches through `EnvelopeDispatcher.dispatch()` — **both pipelines run concurrently on the same envelope**:
-   - `ActionItemPipeline` → extracts action items, matches/deduplicates, creates topics → writes to **AI DB**
-   - `DealPipeline` → extracts deals (MEDDIC), matches/deduplicates, merges → writes to **Deal DB**
+   - `ActionItemPipeline` → extracts action items, matches/deduplicates, creates topics → writes to **shared DB**
+   - `DealPipeline` → extracts deals (MEDDIC), matches/deduplicates, merges → writes to **shared DB**
    - Both execute via `asyncio.gather(return_exceptions=True)` — one failing never blocks the other
 3. Prints per-pipeline results (items extracted, deals created/merged, timing)
 4. Asserts `result.both_succeeded == True` (the "Both OK" column in the summary table)
-5. **Verifies Deal DB state** after each transcript (Account count, Interaction count, `deal_count` enrichment)
+5. **Verifies DB state** after each transcript (Account count, Interaction count, `deal_count` enrichment)
 
 #### Phase 3: Final State Queries
-Queries both databases for complete state:
+Queries the database for complete state:
 
-- **AI DB**: All ActionItems (with Owner, Topic, source Interaction), all Topics (with linked items), all Owners, all Interactions
-- **Deal DB**: All Deals (with full MEDDIC profile), all DealVersions (with change audit), all Interactions (with `deal_count` enrichment)
+- All ActionItems (with Owner, ActionItemTopic, source Interaction)
+- All ActionItemTopics (with linked items)
+- All Owners
+- All Deals (with full MEDDIC profile)
+- All DealVersions (with change audit)
+- All Interactions (with `deal_count` enrichment)
 
 #### Phase 4: Summary Report
 Prints a comprehensive table showing results from **both pipelines for each transcript**:
@@ -186,7 +174,7 @@ TOTAL                          45         17       3        1                  3
 | Both pipelines run concurrently on every envelope | `EnvelopeDispatcher` uses `asyncio.gather()` — single dispatch call, both execute in parallel |
 | Both pipelines succeed for all transcripts | `both_succeeded = True` for all 4 envelopes |
 | Shared OpenAI client works under concurrent load | Both pipelines call the same `OpenAIClient` for extraction + embeddings without conflict |
-| Separate databases receive correct writes | AI DB contains action items/topics; Deal DB contains deals/versions — no cross-contamination |
+| Shared database receives correct writes | Database contains action items/topics/deals/versions with proper tenant isolation |
 | Zero errors across entire run | `result.errors == []` for every dispatch |
 | Action items persisted with topics | Final state query: 45 items, 17 topics, 100% coverage |
 | Deals created with MEDDIC | Final state query: 3 deals, all 100% MEDDIC completeness |
@@ -226,8 +214,8 @@ TOTAL                          45         17       3        1                  3
 |----------|--------|
 | Have both pipelines been tested simultaneously? | **Yes.** The live E2E smoke test dispatches every transcript through `EnvelopeDispatcher`, which runs both pipelines concurrently via `asyncio.gather()`. |
 | When was this last validated? | **2026-02-03.** All 4 transcripts processed with `both_succeeded = True` for every envelope. Zero errors. |
-| What does "simultaneously" mean technically? | A single `dispatch()` call launches `ActionItemPipeline.process_envelope()` and `DealPipeline.process_envelope()` as concurrent coroutines. They share one OpenAI client but write to separate Neo4j databases. |
-| How do we know both actually executed? | The summary table shows both AI Items > 0 **and** Deal activity (3 created, 1 merged) across the run. Final state queries confirm nodes in both databases. |
+| What does "simultaneously" mean technically? | A single `dispatch()` call launches `ActionItemPipeline.process_envelope()` and `DealPipeline.process_envelope()` as concurrent coroutines. They share one OpenAI client and write to the same Neo4j database with tenant isolation. |
+| How do we know both actually executed? | The summary table shows both AI Items > 0 **and** Deal activity (3 created, 1 merged) across the run. Final state queries confirm nodes from both pipelines in the database. |
 | What if one pipeline fails? | `asyncio.gather(return_exceptions=True)` captures the exception without canceling the other pipeline. The "Partial System Failure" integration test (Section 4) validates this contract. |
 | How to re-run? | `python scripts/run_live_e2e.py` with all credentials in `.env`. |
 
@@ -447,16 +435,17 @@ The following contracts have been validated through the combination of live E2E 
 
 **Full results**: [`docs/LIVE_E2E_TEST_RESULTS.md`](./LIVE_E2E_TEST_RESULTS.md)
 
-| Metric | AI DB | Deal DB |
-|--------|-------|---------|
-| Action Items / Deals | 45 | 3 |
-| Topics / DealVersions | 17 | 1 |
-| Owners | 7 | -- |
-| Interactions | 4 | 4 |
-| Topic Coverage | 100% | -- |
-| Errors | 0 | 0 |
-| Wall-clock Time | -- | -- |
-| **Total** | -- | 343,815 ms |
+| Metric | Count |
+|--------|-------|
+| Action Items | 45 |
+| ActionItemTopics | 17 |
+| Deals | 3 |
+| DealVersions | 1 |
+| Owners | 7 |
+| Interactions | 4 |
+| Topic Coverage | 100% |
+| Errors | 0 |
+| Wall-clock Time | 343,815 ms |
 
 **Deals created:**
 
@@ -511,14 +500,14 @@ The AI Database was re-provisioned on a new AuraDB Free instance (`neo4j+s://1aa
 Quick queries to check database health (run via MCP or Cypher shell):
 
 ```cypher
--- AI DB: Count all node types for tenant
+-- Count all node types for tenant
 MATCH (n) WHERE n.tenant_id = '11111111-1111-4111-8111-111111111111'
 RETURN labels(n)[0] AS label, count(n) AS count ORDER BY label
 
--- Deal DB: List all deals with MEDDIC completeness
+-- List all deals with MEDDIC completeness
 MATCH (d:Deal) WHERE d.tenant_id = '11111111-1111-4111-8111-111111111111'
 RETURN d.name, d.stage, d.amount, d.meddic_completeness, d.version
-ORDER BY d.created_at
+ORDER BY d.timestamp
 
 -- Check all indexes are ONLINE
 SHOW INDEXES YIELD name, state WHERE state <> 'ONLINE' RETURN name, state

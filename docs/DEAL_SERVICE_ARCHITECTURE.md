@@ -22,11 +22,12 @@
      │ Merge → Topics    │           │ Merge → Persist   │
      └────────┬──────────┘           └────────┬──────────┘
               |                               |
-              v                               v
-     ┌───────────────┐              ┌───────────────┐
-     │ AI Neo4j DB   │              │ Deal Neo4j DB │
-     │ (NEO4J_*)     │              │ (DEAL_NEO4J_*)│
-     └───────────────┘              └───────────────┘
+              └───────────────┬───────────────┘
+                              v
+                    ┌───────────────────┐
+                    │ Shared Neo4j DB   │
+                    │ (NEO4J_*)         │
+                    └───────────────────┘
 ```
 
 Both pipelines receive the same `EnvelopeV1` and run **concurrently**. One
@@ -36,36 +37,27 @@ independently.
 
 **Entry point**: `EnvelopeDispatcher.dispatch(envelope)` in `src/dispatcher/dispatcher.py`
 
-### Two Separate Neo4j Databases
+### Shared Neo4j Database
 
-The AI and Deal pipelines write to **physically separate Neo4j Aura instances**. They
-share no data, no constraints, and no driver connections:
+The AI and Deal pipelines write to a **single shared Neo4j Aura instance** with tenant-scoped isolation. Both pipelines use the same database connection and share schema:
 
-| Aspect | AI DB | Deal DB |
-|--------|-------|---------|
-| Env vars | `NEO4J_URI`, `NEO4J_PASSWORD` | `DEAL_NEO4J_URI`, `DEAL_NEO4J_PASSWORD` |
-| Client class | `Neo4jClient` | `DealNeo4jClient` |
-| Schema owner | `Neo4jClient.setup_schema()` | `DealNeo4jClient.setup_schema()` |
-| Node labels | Account, Interaction, ActionItem, ActionItemVersion, Owner, Topic, TopicVersion | Deal, DealVersion, Interaction, Account |
-| Vector indexes | 4 (ActionItem + Topic × embedding/embedding_current) | 2 (Deal × embedding/embedding_current) |
+| Aspect | Shared DB |
+|--------|-----------|
+| Env vars | `NEO4J_URI`, `NEO4J_PASSWORD` |
+| Client class | `Neo4jClient` (shared) |
+| Schema owner | `Neo4jClient.setup_schema()` |
+| Node labels | Account, Interaction, ActionItem, ActionItemVersion, Owner, ActionItemTopic, ActionItemTopicVersion, Deal, DealVersion |
+| Vector indexes | 6 (ActionItem + ActionItemTopic + Deal × embedding/embedding_current) |
 
-**What `DealNeo4jClient.setup_schema()` creates (enrichment-only):**
+**What `Neo4jClient.setup_schema()` creates:**
 
-| Type | Name | Target |
-|------|------|--------|
-| Uniqueness constraint | `dealversion_unique` | `DealVersion (tenant_id, version_id)` |
-| Index | `deal_stage_idx` | `Deal (tenant_id, stage)` |
-| Index | `deal_account_idx` | `Deal (tenant_id, account_id)` |
-| Vector index | `deal_embedding_idx` | `Deal.embedding` (1536-dim, cosine) |
-| Vector index | `deal_embedding_current_idx` | `Deal.embedding_current` (1536-dim, cosine) |
+All constraints, indexes, and vector indexes for both pipelines are created by the shared schema setup. This includes:
 
-Skeleton constraints on Deal, Interaction, Account, and Contact are **not created
-by our code** — they are expected to already exist in the database, and
-`verify_skeleton_schema()` checks for their presence before the pipeline starts.
+- NODE KEY constraints on `(tenant_id, label_id)` for all entity labels
+- Property indexes for `tenant_id`, `account_id`, `status`, `stage`, etc.
+- Vector indexes for ActionItem, ActionItemTopic, and Deal (both `embedding` and `embedding_current`)
 
-`DealNeo4jClient` inherits connection/retry logic from `Neo4jClient` but overrides
-`setup_schema()` entirely. Instantiated with `DEAL_NEO4J_*` credentials, it cannot
-reach the AI DB.
+Both pipelines share the same Neo4j client and database instance, with tenant-scoped isolation ensuring data separation.
 
 ---
 
@@ -266,7 +258,7 @@ Deal data follows the MEDDIC sales methodology framework:
 |------------|-------|--------|-----------|
 | `tenant_id` | Global | UUID v4 | Upstream system |
 | `account_id` | Per tenant | String | Upstream system |
-| `interaction_id` | Per tenant | UUID v4 | `EnvelopeV1.interaction_id` or generated |
+| `interaction_id` | Per tenant | String (UUID v4 when generated) | `EnvelopeV1.interaction_id` or generated |
 | `opportunity_id` | Per tenant | **UUID v7** (RFC 9562) | `deal_graph.utils.uuid7()` |
 
 `opportunity_id` is the canonical primary key for deals, minted by our system.
@@ -310,29 +302,28 @@ Other node associations use **shared properties** rather than graph edges:
 |------|---------------|------|
 | `Deal` | `tenant_id`, `opportunity_id`, MEDDIC fields, embeddings | Primary entity |
 | `DealVersion` | `tenant_id`, `version_id`, snapshot fields, `changed_fields` | Temporal snapshot |
-| `Interaction` | `tenant_id`, `interaction_id`, `content_text` | Episodic memory |
+| `Interaction` | `tenant_id`, `interaction_id`, `content_text`, `timestamp` | Episodic memory |
 | `Account` | `tenant_id`, `account_id` | Tenant/account scoping |
 
 ### Multi-Tenancy & Scoping
 
-All Deal DB queries are scoped by `tenant_id` and `account_id`:
+All database queries (both AI and Deal pipelines) are scoped by `tenant_id` and `account_id`:
 
 - **`tenant_id`** is a composite key component on every node. Constraints enforce
-  uniqueness within a tenant (e.g., `(tenant_id, opportunity_id)` on `Deal`).
+  uniqueness within a tenant (e.g., `(tenant_id, opportunity_id)` on `Deal`, `(tenant_id, action_item_id)` on `ActionItem`).
 - **`account_id`** scopes vector search to prevent cross-account matching. A deal
   for "Acme Corp" will never match against "Beta Inc" deals, even within the same
-  tenant.
+  tenant. Similarly, action items are isolated by account.
 - Vector search filters: `WHERE node.tenant_id = $tenant_id AND
-  node.account_id = $account_id` are applied in `DealNeo4jClient` search methods.
-- **AI DB constraints are managed by `Neo4jClient`; Deal DB constraints are managed
-  by `DealNeo4jClient`.** These are separate Neo4j instances with independent schema
-  lifecycle.
+  node.account_id = $account_id` are applied in all search methods.
+- **Both pipelines share the same `Neo4jClient` and database instance.** Schema is
+  managed centrally by `Neo4jClient.setup_schema()`.
 
 ### Idempotency & Failure Modes
 
 **Idempotent operations:**
 
-- `DealNeo4jClient.setup_schema()` — all constraints/indexes use `IF NOT EXISTS`.
+- `Neo4jClient.setup_schema()` — all constraints/indexes use `IF NOT EXISTS`.
   Safe to call on every startup.
 - `DealRepository.verify_account()` — uses `MERGE` on `(tenant_id, account_id)`.
   Creates the Account node only if absent.

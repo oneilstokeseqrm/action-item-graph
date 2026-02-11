@@ -83,12 +83,12 @@ class TestCreateNew:
 
             # Create test data
             interaction = Interaction(
-                id=interaction_id,
+                interaction_id=interaction_id,
                 tenant_id=tenant_uuid,
                 account_id=sample_account_id,
                 interaction_type=InteractionType.TRANSCRIPT,
-                transcript_text="Test transcript",
-                occurred_at=datetime.now(),
+                content_text="Test transcript",
+                timestamp=datetime.now(),
             )
 
             # Create ActionItem model
@@ -209,12 +209,12 @@ class TestUpdateStatus:
             # Create interaction for the status update
             interaction_id = uuid.uuid4()
             interaction = Interaction(
-                id=interaction_id,
+                interaction_id=interaction_id,
                 tenant_id=tenant_uuid,
                 account_id=sample_account_id,
                 interaction_type=InteractionType.TRANSCRIPT,
-                transcript_text="John: I sent the contract yesterday.",
-                occurred_at=datetime.now(),
+                content_text="John: I sent the contract yesterday.",
+                timestamp=datetime.now(),
             )
             await merger.repository.create_interaction(interaction)
 
@@ -326,12 +326,12 @@ class TestMergeItems:
             # Create interaction with more details
             interaction_id = uuid.uuid4()
             interaction = Interaction(
-                id=interaction_id,
+                interaction_id=interaction_id,
                 tenant_id=tenant_uuid,
                 account_id=sample_account_id,
                 interaction_type=InteractionType.TRANSCRIPT,
-                transcript_text="Sarah: I'll send the pricing proposal to John by end of day.",
-                occurred_at=datetime.now(),
+                content_text="Sarah: I'll send the pricing proposal to John by end of day.",
+                timestamp=datetime.now(),
             )
             await merger.repository.create_interaction(interaction)
 
@@ -442,12 +442,12 @@ class TestLinkRelated:
             # Create interaction
             interaction_id = uuid.uuid4()
             interaction = Interaction(
-                id=interaction_id,
+                interaction_id=interaction_id,
                 tenant_id=tenant_uuid,
                 account_id=sample_account_id,
                 interaction_type=InteractionType.TRANSCRIPT,
-                transcript_text="John: I'll review the proposal once Sarah sends it.",
-                occurred_at=datetime.now(),
+                content_text="John: I'll review the proposal once Sarah sends it.",
+                timestamp=datetime.now(),
             )
             await merger.repository.create_interaction(interaction)
 
@@ -570,12 +570,12 @@ class TestVersionSnapshots:
 
             # Create status update
             interaction = Interaction(
-                id=uuid.uuid4(),
+                interaction_id=uuid.uuid4(),
                 tenant_id=tenant_uuid,
                 account_id=sample_account_id,
                 interaction_type=InteractionType.TRANSCRIPT,
-                transcript_text="John: Demo is scheduled for next week.",
-                occurred_at=datetime.now(),
+                content_text="John: Demo is scheduled for next week.",
+                timestamp=datetime.now(),
             )
             await merger.repository.create_interaction(interaction)
 

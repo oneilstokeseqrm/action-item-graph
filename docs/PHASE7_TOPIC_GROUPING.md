@@ -10,7 +10,7 @@ Topic Grouping clusters related action items into shared high-level themes/proje
 
 | File | Purpose |
 |------|---------|
-| `src/action_item_graph/models/topic.py` | Topic, TopicVersion, ExtractedTopic models |
+| `src/action_item_graph/models/topic.py` | ActionItemTopic, ActionItemTopicVersion, ExtractedTopic models |
 | `src/action_item_graph/pipeline/topic_resolver.py` | TopicResolver - matching extracted topics to existing or new |
 | `src/action_item_graph/pipeline/topic_executor.py` | TopicExecutor - creating topics and linking action items |
 | `prompts/topic_prompts.py` | LLM prompts for topic matching and summary generation |
@@ -24,7 +24,7 @@ Topic Grouping clusters related action items into shared high-level themes/proje
 |------|---------|
 | `prompts/extract_action_items.py` | Added `ExtractedTopic` model and `topic` field to `ExtractedActionItem` |
 | `prompts/__init__.py` | Exported topic-related classes and functions |
-| `src/action_item_graph/models/__init__.py` | Exported Topic, TopicVersion, ExtractedTopic |
+| `src/action_item_graph/models/__init__.py` | Exported ActionItemTopic, ActionItemTopicVersion, ExtractedTopic |
 | `src/action_item_graph/pipeline/__init__.py` | Exported TopicResolver, TopicExecutor, and related classes |
 | `src/action_item_graph/pipeline/pipeline.py` | Integrated topic resolution phase into pipeline |
 | `src/action_item_graph/repository.py` | Added topic CRUD methods |
@@ -61,17 +61,17 @@ Topics use the same dual embedding strategy as ActionItems:
 ### Neo4j Schema Additions
 
 **Nodes:**
-- `Topic` - High-level theme/project
-- `TopicVersion` - Historical snapshot of topic state
+- `ActionItemTopic` - High-level theme/project
+- `ActionItemTopicVersion` - Historical snapshot of topic state
 
 **Relationships:**
-- `(:Account)-[:HAS_TOPIC]->(:Topic)`
-- `(:ActionItem)-[:BELONGS_TO]->(:Topic)`
-- `(:Topic)-[:HAS_VERSION]->(:TopicVersion)`
+- `(:Account)-[:HAS_TOPIC]->(:ActionItemTopic)`
+- `(:ActionItem)-[:BELONGS_TO]->(:ActionItemTopic)`
+- `(:ActionItemTopic)-[:HAS_VERSION]->(:ActionItemTopicVersion)`
 
 **Vector Indexes:**
-- `topic_embedding_idx` - For original topic embeddings
-- `topic_embedding_current_idx` - For current topic embeddings
+- `action_item_topic_embedding_idx` - For original topic embeddings
+- `action_item_topic_embedding_current_idx` - For current topic embeddings
 
 ## Usage
 

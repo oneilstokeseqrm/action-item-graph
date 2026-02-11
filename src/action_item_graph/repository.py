@@ -15,7 +15,7 @@ from uuid import UUID
 from .clients.neo4j_client import Neo4jClient
 from .models.action_item import ActionItem, ActionItemStatus, ActionItemVersion
 from .models.entities import Account, Interaction, Owner
-from .models.topic import Topic, TopicVersion
+from .models.topic import ActionItemTopic, ActionItemTopicVersion
 
 
 class ActionItemRepository:
@@ -60,7 +60,7 @@ class ActionItemRepository:
             Account node properties
         """
         query = """
-            MERGE (a:Account {id: $account_id, tenant_id: $tenant_id})
+            MERGE (a:Account {account_id: $account_id, tenant_id: $tenant_id})
             ON CREATE SET
                 a.name = coalesce($name, $account_id),
                 a.created_at = datetime()
@@ -85,31 +85,61 @@ class ActionItemRepository:
         interaction: Interaction,
     ) -> dict[str, Any]:
         """
-        Create an Interaction node and link to Account.
+        Create or merge an Interaction node and link to Account.
+
+        Uses defensive MERGE so that if another pipeline (e.g. structured graph
+        or deal pipeline) already created the Interaction node, we enrich it
+        rather than failing with a constraint violation.
 
         Args:
             interaction: Interaction model
 
         Returns:
-            Created Interaction node properties
+            Created/merged Interaction node properties
         """
-        props = interaction.to_neo4j_properties()
-
         query = """
-            CREATE (i:Interaction $props)
+            MERGE (i:Interaction {tenant_id: $tenant_id, interaction_id: $interaction_id})
+            ON CREATE SET
+                i.content_text = $content_text,
+                i.interaction_type = $interaction_type,
+                i.timestamp = $timestamp,
+                i.source = $source,
+                i.user_id = $user_id,
+                i.title = $title,
+                i.duration_seconds = $duration_seconds,
+                i.created_at = datetime()
+            ON MATCH SET
+                i.action_item_count = $action_item_count,
+                i.processed_at = datetime()
             WITH i
-            OPTIONAL MATCH (a:Account {id: $account_id, tenant_id: $tenant_id})
+            OPTIONAL MATCH (a:Account {account_id: $account_id, tenant_id: $tenant_id})
             FOREACH (_ IN CASE WHEN a IS NOT NULL THEN [1] ELSE [] END |
                 MERGE (a)-[:HAS_INTERACTION]->(i)
             )
             RETURN i {.*} as interaction
         """
+        # Handle interaction_type whether it's an enum or already a string
+        from .models.entities import InteractionType
+        interaction_type_value = (
+            interaction.interaction_type.value
+            if isinstance(interaction.interaction_type, InteractionType)
+            else interaction.interaction_type
+        )
+
         result = await self.neo4j.execute_write(
             query,
             {
-                'props': props,
-                'account_id': interaction.account_id,
                 'tenant_id': str(interaction.tenant_id),
+                'interaction_id': str(interaction.interaction_id),
+                'content_text': interaction.content_text,
+                'interaction_type': interaction_type_value,
+                'timestamp': interaction.timestamp.isoformat(),
+                'source': interaction.source,
+                'user_id': interaction.user_id,
+                'title': interaction.title,
+                'duration_seconds': interaction.duration_seconds,
+                'action_item_count': interaction.action_item_count,
+                'account_id': interaction.account_id,
             },
         )
         return result[0]['interaction'] if result else {}
@@ -132,7 +162,7 @@ class ActionItemRepository:
             Updated Interaction node properties
         """
         query = """
-            MATCH (i:Interaction {id: $interaction_id, tenant_id: $tenant_id})
+            MATCH (i:Interaction {interaction_id: $interaction_id, tenant_id: $tenant_id})
             SET i += $updates
             RETURN i {.*} as interaction
         """
@@ -157,9 +187,9 @@ class ActionItemRepository:
         """
         Create an ActionItem node and link to Account.
 
-        Uses MERGE on ActionItem.id so that duplicate writes (e.g. from
-        dict-key collisions in the pipeline's text-based lookup) are
-        idempotent instead of raising a constraint violation.
+        Uses MERGE on ActionItem.action_item_id so that duplicate writes
+        (e.g. from dict-key collisions in the pipeline's text-based lookup)
+        are idempotent instead of raising a constraint violation.
 
         Args:
             action_item: ActionItem model with embeddings
@@ -170,10 +200,10 @@ class ActionItemRepository:
         props = action_item.to_neo4j_properties()
 
         query = """
-            MERGE (ai:ActionItem {id: $id, tenant_id: $tenant_id})
+            MERGE (ai:ActionItem {action_item_id: $action_item_id, tenant_id: $tenant_id})
             ON CREATE SET ai += $props
             WITH ai
-            OPTIONAL MATCH (a:Account {id: $account_id, tenant_id: $tenant_id})
+            OPTIONAL MATCH (a:Account {account_id: $account_id, tenant_id: $tenant_id})
             FOREACH (_ IN CASE WHEN a IS NOT NULL THEN [1] ELSE [] END |
                 MERGE (a)-[:HAS_ACTION_ITEM]->(ai)
             )
@@ -182,7 +212,7 @@ class ActionItemRepository:
         result = await self.neo4j.execute_write(
             query,
             {
-                'id': props['id'],
+                'action_item_id': props['action_item_id'],
                 'tenant_id': str(action_item.tenant_id),
                 'props': props,
                 'account_id': action_item.account_id,
@@ -206,7 +236,7 @@ class ActionItemRepository:
             ActionItem node properties or None if not found
         """
         query = """
-            MATCH (ai:ActionItem {id: $action_item_id, tenant_id: $tenant_id})
+            MATCH (ai:ActionItem {action_item_id: $action_item_id, tenant_id: $tenant_id})
             RETURN ai {.*} as action_item
         """
         result = await self.neo4j.execute_query(
@@ -241,7 +271,7 @@ class ActionItemRepository:
         updates['last_updated_at'] = datetime.now().isoformat()
 
         query = """
-            MATCH (ai:ActionItem {id: $action_item_id, tenant_id: $tenant_id})
+            MATCH (ai:ActionItem {action_item_id: $action_item_id, tenant_id: $tenant_id})
             SET ai += $updates,
                 ai.version = ai.version + 1
             RETURN ai {.*} as action_item
@@ -278,7 +308,7 @@ class ActionItemRepository:
         status_value = status.value if isinstance(status, ActionItemStatus) else status
 
         query = """
-            MATCH (ai:ActionItem {id: $action_item_id, tenant_id: $tenant_id})
+            MATCH (ai:ActionItem {action_item_id: $action_item_id, tenant_id: $tenant_id})
             SET ai.status = $status,
                 ai.last_updated_at = $now,
                 ai.version = ai.version + 1
@@ -321,10 +351,10 @@ class ActionItemRepository:
             Created ActionItemVersion node properties
         """
         query = """
-            MATCH (ai:ActionItem {id: $action_item_id, tenant_id: $tenant_id})
+            MATCH (ai:ActionItem {action_item_id: $action_item_id, tenant_id: $tenant_id})
             CREATE (v:ActionItemVersion {
-                id: randomUUID(),
-                action_item_id: ai.id,
+                version_id: randomUUID(),
+                action_item_id: ai.action_item_id,
                 tenant_id: ai.tenant_id,
                 version: ai.version,
                 action_item_text: ai.action_item_text,
@@ -376,8 +406,8 @@ class ActionItemRepository:
             True if relationship was created
         """
         query = """
-            MATCH (ai:ActionItem {id: $action_item_id, tenant_id: $tenant_id})
-            MATCH (i:Interaction {id: $interaction_id, tenant_id: $tenant_id})
+            MATCH (ai:ActionItem {action_item_id: $action_item_id, tenant_id: $tenant_id})
+            MATCH (i:Interaction {interaction_id: $interaction_id, tenant_id: $tenant_id})
             MERGE (ai)-[r:EXTRACTED_FROM]->(i)
             ON CREATE SET r.created_at = datetime()
             RETURN r IS NOT NULL as created
@@ -410,8 +440,8 @@ class ActionItemRepository:
             True if relationship was created
         """
         query = """
-            MATCH (ai:ActionItem {id: $action_item_id, tenant_id: $tenant_id})
-            MATCH (o:Owner {id: $owner_id, tenant_id: $tenant_id})
+            MATCH (ai:ActionItem {action_item_id: $action_item_id, tenant_id: $tenant_id})
+            MATCH (o:Owner {owner_id: $owner_id, tenant_id: $tenant_id})
             MERGE (ai)-[r:OWNED_BY]->(o)
             ON CREATE SET r.created_at = datetime()
             RETURN r IS NOT NULL as created
@@ -447,8 +477,8 @@ class ActionItemRepository:
         """
         # Use parameterized relationship type for safety
         query = f"""
-            MATCH (ai1:ActionItem {{id: $action_item_id, tenant_id: $tenant_id}})
-            MATCH (ai2:ActionItem {{id: $related_item_id, tenant_id: $tenant_id}})
+            MATCH (ai1:ActionItem {{action_item_id: $action_item_id, tenant_id: $tenant_id}})
+            MATCH (ai2:ActionItem {{action_item_id: $related_item_id, tenant_id: $tenant_id}})
             MERGE (ai1)-[r:{relationship_type}]->(ai2)
             ON CREATE SET r.created_at = datetime()
             RETURN r IS NOT NULL as created
@@ -519,13 +549,13 @@ class ActionItemRepository:
             owner = result[0]['owner']
             # Add name to aliases if it's a new variant
             if normalized_name not in owner.get('aliases', []) and normalized_name != owner.get('canonical_name'):
-                await self._add_owner_alias(owner['id'], str(tenant_id), normalized_name)
+                await self._add_owner_alias(owner['owner_id'], str(tenant_id), normalized_name)
             return owner
 
         # Create new owner
         create_query = """
             CREATE (o:Owner {
-                id: randomUUID(),
+                owner_id: randomUUID(),
                 tenant_id: $tenant_id,
                 canonical_name: $name,
                 aliases: [],
@@ -550,7 +580,7 @@ class ActionItemRepository:
     ) -> None:
         """Add an alias to an existing Owner."""
         query = """
-            MATCH (o:Owner {id: $owner_id, tenant_id: $tenant_id})
+            MATCH (o:Owner {owner_id: $owner_id, tenant_id: $tenant_id})
             WHERE NOT $alias IN o.aliases
             SET o.aliases = o.aliases + $alias
         """
@@ -639,7 +669,7 @@ class ActionItemRepository:
             params['status'] = status.value if isinstance(status, ActionItemStatus) else status
 
         query = f"""
-            MATCH (a:Account {{id: $account_id, tenant_id: $tenant_id}})-[:HAS_ACTION_ITEM]->(ai:ActionItem)
+            MATCH (a:Account {{account_id: $account_id, tenant_id: $tenant_id}})-[:HAS_ACTION_ITEM]->(ai:ActionItem)
             WHERE ai.tenant_id = $tenant_id {status_filter}
             RETURN ai {{.*}} as action_item
             ORDER BY ai.created_at DESC
@@ -664,7 +694,7 @@ class ActionItemRepository:
             List of ActionItemVersion properties, ordered by version desc
         """
         query = """
-            MATCH (ai:ActionItem {id: $action_item_id, tenant_id: $tenant_id})-[:HAS_VERSION]->(v:ActionItemVersion)
+            MATCH (ai:ActionItem {action_item_id: $action_item_id, tenant_id: $tenant_id})-[:HAS_VERSION]->(v:ActionItemVersion)
             RETURN v {.*} as version
             ORDER BY v.version DESC
         """
@@ -678,28 +708,28 @@ class ActionItemRepository:
         return [r['version'] for r in result]
 
     # =========================================================================
-    # Topic Operations
+    # ActionItemTopic Operations
     # =========================================================================
 
     async def create_topic(
         self,
-        topic: Topic,
+        topic: ActionItemTopic,
     ) -> dict[str, Any]:
         """
-        Create a Topic node and link to Account.
+        Create an ActionItemTopic node and link to Account.
 
         Args:
-            topic: Topic model with embeddings
+            topic: ActionItemTopic model with embeddings
 
         Returns:
-            Created Topic node properties
+            Created ActionItemTopic node properties
         """
         props = topic.to_neo4j_properties()
 
         query = """
-            CREATE (t:Topic $props)
+            CREATE (t:ActionItemTopic $props)
             WITH t
-            OPTIONAL MATCH (a:Account {id: $account_id, tenant_id: $tenant_id})
+            OPTIONAL MATCH (a:Account {account_id: $account_id, tenant_id: $tenant_id})
             FOREACH (_ IN CASE WHEN a IS NOT NULL THEN [1] ELSE [] END |
                 MERGE (a)-[:HAS_TOPIC]->(t)
             )
@@ -721,17 +751,17 @@ class ActionItemRepository:
         tenant_id: UUID,
     ) -> dict[str, Any] | None:
         """
-        Retrieve a Topic by ID.
+        Retrieve an ActionItemTopic by ID.
 
         Args:
-            topic_id: Topic UUID string
+            topic_id: ActionItemTopic UUID string
             tenant_id: Tenant UUID
 
         Returns:
-            Topic node properties or None if not found
+            ActionItemTopic node properties or None if not found
         """
         query = """
-            MATCH (t:Topic {id: $topic_id, tenant_id: $tenant_id})
+            MATCH (t:ActionItemTopic {action_item_topic_id: $topic_id, tenant_id: $tenant_id})
             RETURN t {.*} as topic
         """
         result = await self.neo4j.execute_query(
@@ -750,18 +780,18 @@ class ActionItemRepository:
         updates: dict[str, Any],
     ) -> dict[str, Any]:
         """
-        Update an existing Topic node.
+        Update an existing ActionItemTopic node.
 
         Args:
-            topic_id: Topic UUID string
+            topic_id: ActionItemTopic UUID string
             tenant_id: Tenant UUID
             updates: Properties to update
 
         Returns:
-            Updated Topic node properties
+            Updated ActionItemTopic node properties
         """
         query = """
-            MATCH (t:Topic {id: $topic_id, tenant_id: $tenant_id})
+            MATCH (t:ActionItemTopic {action_item_topic_id: $topic_id, tenant_id: $tenant_id})
             SET t += $updates
             RETURN t {.*} as topic
         """
@@ -786,10 +816,10 @@ class ActionItemRepository:
         changed_by_action_item_id: UUID | None = None,
     ) -> dict[str, Any]:
         """
-        Create a TopicVersion snapshot.
+        Create an ActionItemTopicVersion snapshot.
 
         Args:
-            topic_id: Topic UUID string
+            topic_id: ActionItemTopic UUID string
             tenant_id: Tenant UUID
             version_number: Version number
             name: Topic name at this version
@@ -798,12 +828,12 @@ class ActionItemRepository:
             changed_by_action_item_id: Action item that triggered this version
 
         Returns:
-            Created TopicVersion node properties
+            Created ActionItemTopicVersion node properties
         """
         query = """
-            MATCH (t:Topic {id: $topic_id, tenant_id: $tenant_id})
-            CREATE (v:TopicVersion {
-                id: randomUUID(),
+            MATCH (t:ActionItemTopic {action_item_topic_id: $topic_id, tenant_id: $tenant_id})
+            CREATE (v:ActionItemTopicVersion {
+                version_id: randomUUID(),
                 topic_id: $topic_id,
                 tenant_id: $tenant_id,
                 version_number: $version_number,
@@ -841,11 +871,11 @@ class ActionItemRepository:
         method: str = 'extracted',
     ) -> bool:
         """
-        Create BELONGS_TO relationship between ActionItem and Topic.
+        Create BELONGS_TO relationship between ActionItem and ActionItemTopic.
 
         Args:
             action_item_id: ActionItem UUID string
-            topic_id: Topic UUID string
+            topic_id: ActionItemTopic UUID string
             tenant_id: Tenant UUID
             confidence: Confidence score for the link
             method: How the link was created ('extracted', 'resolved', 'manual')
@@ -854,8 +884,8 @@ class ActionItemRepository:
             True if relationship was created
         """
         query = """
-            MATCH (ai:ActionItem {id: $action_item_id, tenant_id: $tenant_id})
-            MATCH (t:Topic {id: $topic_id, tenant_id: $tenant_id})
+            MATCH (ai:ActionItem {action_item_id: $action_item_id, tenant_id: $tenant_id})
+            MATCH (t:ActionItemTopic {action_item_topic_id: $topic_id, tenant_id: $tenant_id})
             MERGE (ai)-[r:BELONGS_TO]->(t)
             ON CREATE SET
                 r.confidence = $confidence,
@@ -881,17 +911,17 @@ class ActionItemRepository:
         tenant_id: UUID,
     ) -> int:
         """
-        Increment the action_item_count for a Topic.
+        Increment the action_item_count for an ActionItemTopic.
 
         Args:
-            topic_id: Topic UUID string
+            topic_id: ActionItemTopic UUID string
             tenant_id: Tenant UUID
 
         Returns:
             New action item count
         """
         query = """
-            MATCH (t:Topic {id: $topic_id, tenant_id: $tenant_id})
+            MATCH (t:ActionItemTopic {action_item_topic_id: $topic_id, tenant_id: $tenant_id})
             SET t.action_item_count = coalesce(t.action_item_count, 0) + 1,
                 t.updated_at = datetime()
             RETURN t.action_item_count as count
@@ -912,7 +942,7 @@ class ActionItemRepository:
         limit: int = 50,
     ) -> list[dict[str, Any]]:
         """
-        Get all Topics for an account.
+        Get all ActionItemTopics for an account.
 
         Args:
             tenant_id: Tenant UUID
@@ -920,10 +950,10 @@ class ActionItemRepository:
             limit: Maximum results
 
         Returns:
-            List of Topic node properties
+            List of ActionItemTopic node properties
         """
         query = """
-            MATCH (a:Account {id: $account_id, tenant_id: $tenant_id})-[:HAS_TOPIC]->(t:Topic)
+            MATCH (a:Account {account_id: $account_id, tenant_id: $tenant_id})-[:HAS_TOPIC]->(t:ActionItemTopic)
             WHERE t.tenant_id = $tenant_id
             RETURN t {.*} as topic
             ORDER BY t.action_item_count DESC, t.created_at DESC
@@ -945,17 +975,17 @@ class ActionItemRepository:
         tenant_id: UUID,
     ) -> dict[str, Any] | None:
         """
-        Get a Topic with all its linked ActionItems.
+        Get an ActionItemTopic with all its linked ActionItems.
 
         Args:
-            topic_id: Topic UUID string
+            topic_id: ActionItemTopic UUID string
             tenant_id: Tenant UUID
 
         Returns:
             Topic properties with 'action_items' list, or None if not found
         """
         query = """
-            MATCH (t:Topic {id: $topic_id, tenant_id: $tenant_id})
+            MATCH (t:ActionItemTopic {action_item_topic_id: $topic_id, tenant_id: $tenant_id})
             OPTIONAL MATCH (ai:ActionItem)-[r:BELONGS_TO]->(t)
             WHERE ai.tenant_id = $tenant_id
             WITH t, collect({
@@ -981,17 +1011,17 @@ class ActionItemRepository:
         tenant_id: UUID,
     ) -> list[dict[str, Any]]:
         """
-        Get version history for a Topic.
+        Get version history for an ActionItemTopic.
 
         Args:
-            topic_id: Topic UUID string
+            topic_id: ActionItemTopic UUID string
             tenant_id: Tenant UUID
 
         Returns:
-            List of TopicVersion properties, ordered by version_number desc
+            List of ActionItemTopicVersion properties, ordered by version_number desc
         """
         query = """
-            MATCH (t:Topic {id: $topic_id, tenant_id: $tenant_id})-[:HAS_VERSION]->(v:TopicVersion)
+            MATCH (t:ActionItemTopic {action_item_topic_id: $topic_id, tenant_id: $tenant_id})-[:HAS_VERSION]->(v:ActionItemTopicVersion)
             RETURN v {.*} as version
             ORDER BY v.version_number DESC
         """

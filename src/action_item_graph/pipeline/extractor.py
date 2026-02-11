@@ -86,13 +86,13 @@ class ActionItemExtractor:
         """
         # Create the Interaction record
         interaction = Interaction(
-            id=envelope.interaction_id or uuid4(),
+            interaction_id=envelope.interaction_id or uuid4(),
             tenant_id=envelope.tenant_id,
             account_id=envelope.account_id,
             interaction_type=InteractionType(envelope.interaction_type.value),
             title=envelope.meeting_title,
-            transcript_text=envelope.content.text,
-            occurred_at=envelope.timestamp,
+            content_text=envelope.content.text,
+            timestamp=envelope.timestamp,
             duration_seconds=envelope.duration_seconds,
             source=envelope.source.value,
             user_id=envelope.user_id,
@@ -111,7 +111,7 @@ class ActionItemExtractor:
             extractions=extraction_result.action_items,
             tenant_id=envelope.tenant_id,
             account_id=envelope.account_id,
-            interaction_id=interaction.id,
+            interaction_id=interaction.interaction_id,
             user_id=envelope.user_id,
         )
 
@@ -152,13 +152,13 @@ class ActionItemExtractor:
         # Create a minimal Interaction record
         interaction_id = uuid4()
         interaction = Interaction(
-            id=interaction_id,
+            interaction_id=interaction_id,
             tenant_id=tenant_id,
             account_id=account_id,
             interaction_type=InteractionType.TRANSCRIPT,
             title=meeting_title,
-            transcript_text=text,
-            occurred_at=datetime.now(tz=None),
+            content_text=text,
+            timestamp=datetime.now(tz=None),
             user_id=user_id,
         )
 

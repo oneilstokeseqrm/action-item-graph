@@ -148,7 +148,7 @@ class ActionItem(BaseModel):
         UUIDs are converted to strings for Neo4j compatibility.
         """
         props = {
-            'id': str(self.id),
+            'action_item_id': str(self.id),
             'tenant_id': str(self.tenant_id),
             'account_id': self.account_id,
             'action_item_text': self.action_item_text,
@@ -228,7 +228,7 @@ class ActionItemVersion(BaseModel):
     def to_neo4j_properties(self) -> dict[str, Any]:
         """Convert to Neo4j-compatible property dict."""
         props = {
-            'id': str(self.id),
+            'version_id': str(self.id),
             'action_item_id': str(self.action_item_id),
             'tenant_id': str(self.tenant_id),
             'version': self.version,

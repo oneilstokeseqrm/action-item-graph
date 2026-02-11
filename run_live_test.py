@@ -39,9 +39,9 @@ async def clean_neo4j(neo4j: Neo4jClient, tenant_id: str):
     # Delete all nodes for this tenant
     queries = [
         "MATCH (n:ActionItemVersion) WHERE n.tenant_id = $tenant_id DETACH DELETE n",
-        "MATCH (n:TopicVersion) WHERE n.tenant_id = $tenant_id DETACH DELETE n",
+        "MATCH (n:ActionItemTopicVersion) WHERE n.tenant_id = $tenant_id DETACH DELETE n",
         "MATCH (n:ActionItem) WHERE n.tenant_id = $tenant_id DETACH DELETE n",
-        "MATCH (n:Topic) WHERE n.tenant_id = $tenant_id DETACH DELETE n",
+        "MATCH (n:ActionItemTopic) WHERE n.tenant_id = $tenant_id DETACH DELETE n",
         "MATCH (n:Owner) WHERE n.tenant_id = $tenant_id DETACH DELETE n",
         "MATCH (n:Interaction) WHERE n.tenant_id = $tenant_id DETACH DELETE n",
         "MATCH (n:Account) WHERE n.tenant_id = $tenant_id DETACH DELETE n",
@@ -128,9 +128,9 @@ async def query_final_state(neo4j: Neo4jClient, tenant_id: str, account_id: str)
     MATCH (ai:ActionItem)
     WHERE ai.tenant_id = $tenant_id AND ai.account_id = $account_id
     OPTIONAL MATCH (ai)-[:OWNED_BY]->(o:Owner)
-    OPTIONAL MATCH (ai)-[:BELONGS_TO]->(t:Topic)
+    OPTIONAL MATCH (ai)-[:BELONGS_TO]->(t:ActionItemTopic)
     OPTIONAL MATCH (ai)-[:EXTRACTED_FROM]->(i:Interaction)
-    RETURN ai.id as id,
+    RETURN ai.action_item_id as id,
            ai.action_item_text as text,
            ai.summary as summary,
            ai.owner as owner,
@@ -157,10 +157,10 @@ async def query_final_state(neo4j: Neo4jClient, tenant_id: str, account_id: str)
     # Query Topics
     print("\n--- TOPICS ---")
     topic_query = """
-    MATCH (t:Topic)
+    MATCH (t:ActionItemTopic)
     WHERE t.tenant_id = $tenant_id AND t.account_id = $account_id
     OPTIONAL MATCH (ai:ActionItem)-[:BELONGS_TO]->(t)
-    WITH t.id as id, t.name as name, t.summary as summary,
+    WITH t.action_item_topic_id as id, t.name as name, t.summary as summary,
          t.action_item_count as count, t.created_at as created_at,
          collect(ai.summary) as linked_items
     RETURN id, name, summary, count, linked_items, created_at
@@ -214,9 +214,9 @@ async def query_final_state(neo4j: Neo4jClient, tenant_id: str, account_id: str)
     MATCH (i:Interaction)
     WHERE i.tenant_id = $tenant_id AND i.account_id = $account_id
     OPTIONAL MATCH (ai:ActionItem)-[:EXTRACTED_FROM]->(i)
-    WITH i.title as title, i.occurred_at as occurred_at, count(ai) as action_item_count
-    RETURN title, occurred_at, action_item_count
-    ORDER BY occurred_at
+    WITH i.title as title, i.timestamp as timestamp, count(ai) as action_item_count
+    RETURN title, timestamp, action_item_count
+    ORDER BY timestamp
     """
     interactions = await neo4j.execute_query(int_query, {
         'tenant_id': tenant_id,

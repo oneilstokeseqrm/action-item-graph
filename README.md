@@ -285,12 +285,12 @@ See [docs/DEAL_SERVICE_ARCHITECTURE.md](./docs/DEAL_SERVICE_ARCHITECTURE.md) for
 ```
 (:Account)-[:HAS_INTERACTION]->(:Interaction)
 (:Account)-[:HAS_ACTION_ITEM]->(:ActionItem)
-(:Account)-[:HAS_TOPIC]->(:Topic)
+(:Account)-[:HAS_TOPIC]->(:ActionItemTopic)
 (:ActionItem)-[:EXTRACTED_FROM]->(:Interaction)
 (:ActionItem)-[:OWNED_BY]->(:Owner)
-(:ActionItem)-[:BELONGS_TO]->(:Topic)
+(:ActionItem)-[:BELONGS_TO]->(:ActionItemTopic)
 (:ActionItem)-[:HAS_VERSION]->(:ActionItemVersion)
-(:Topic)-[:HAS_VERSION]->(:TopicVersion)
+(:ActionItemTopic)-[:HAS_VERSION]->(:ActionItemTopicVersion)
 ```
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for detailed schema documentation.

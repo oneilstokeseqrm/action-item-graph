@@ -177,16 +177,16 @@ def _build_ai_neo4j_mock() -> AsyncMock:
             'name': 'Acme Corp',
         },
         'interaction': {
-            'id': str(INTERACTION_ID),
+            'interaction_id': str(INTERACTION_ID),
             'tenant_id': str(TENANT_ID),
         },
         'action_item': {
-            'id': 'ai_integration_001',
+            'action_item_id': 'ai_integration_001',
             'tenant_id': str(TENANT_ID),
             'action_item_text': 'Email the contract to legal for review by Friday',
         },
         'owner': {
-            'id': 'owner_sarah_001',
+            'owner_id': 'owner_sarah_001',
             'canonical_name': 'Sarah',
         },
         'created': True,

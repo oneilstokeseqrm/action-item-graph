@@ -183,7 +183,7 @@ class ActionItemMerger:
         # Link to interaction
         await self.repository.link_to_interaction(
             action_item_id=str(action_item.id),
-            interaction_id=str(interaction.id),
+            interaction_id=str(interaction.interaction_id),
             tenant_id=action_item.tenant_id,
         )
 
@@ -194,7 +194,7 @@ class ActionItemMerger:
         )
         await self.repository.link_to_owner(
             action_item_id=str(action_item.id),
-            owner_id=owner['id'],
+            owner_id=owner['owner_id'],
             tenant_id=action_item.tenant_id,
         )
 
@@ -203,9 +203,9 @@ class ActionItemMerger:
             action='created',
             was_new=True,
             version_created=False,
-            linked_interaction_id=str(interaction.id),
+            linked_interaction_id=str(interaction.interaction_id),
             details={
-                'owner_id': owner['id'],
+                'owner_id': owner['owner_id'],
                 'owner_name': owner.get('canonical_name', action_item.owner),
             },
         )
@@ -244,7 +244,7 @@ class ActionItemMerger:
             action_item_id=existing_id,
             tenant_id=tenant_id,
             change_summary=f"Status updated to {new_status.value} based on: {extraction.summary}",
-            source_interaction_id=interaction.id,
+            source_interaction_id=interaction.interaction_id,
         )
 
         # Update status
@@ -257,7 +257,7 @@ class ActionItemMerger:
         # Link to interaction (this extraction came from this interaction)
         await self.repository.link_to_interaction(
             action_item_id=existing_id,
-            interaction_id=str(interaction.id),
+            interaction_id=str(interaction.interaction_id),
             tenant_id=tenant_id,
         )
 
@@ -266,7 +266,7 @@ class ActionItemMerger:
             action='status_updated',
             was_new=False,
             version_created=True,
-            linked_interaction_id=str(interaction.id),
+            linked_interaction_id=str(interaction.interaction_id),
             details={
                 'previous_status': updated.get('status'),
                 'new_status': new_status.value,
@@ -325,7 +325,7 @@ class ActionItemMerger:
             action_item_id=existing_id,
             tenant_id=tenant_id,
             change_summary=merged.evolution_summary,
-            source_interaction_id=interaction.id,
+            source_interaction_id=interaction.interaction_id,
         )
 
         # Build updates dict
@@ -358,7 +358,7 @@ class ActionItemMerger:
         # Link to interaction
         await self.repository.link_to_interaction(
             action_item_id=existing_id,
-            interaction_id=str(interaction.id),
+            interaction_id=str(interaction.interaction_id),
             tenant_id=tenant_id,
         )
 
@@ -370,7 +370,7 @@ class ActionItemMerger:
             )
             await self.repository.link_to_owner(
                 action_item_id=existing_id,
-                owner_id=owner['id'],
+                owner_id=owner['owner_id'],
                 tenant_id=tenant_id,
             )
 
@@ -379,7 +379,7 @@ class ActionItemMerger:
             action='merged',
             was_new=False,
             version_created=True,
-            linked_interaction_id=str(interaction.id),
+            linked_interaction_id=str(interaction.interaction_id),
             details={
                 'evolution_summary': merged.evolution_summary,
                 'embedding_updated': merged.should_update_embedding,
@@ -426,7 +426,7 @@ class ActionItemMerger:
             action='linked',
             was_new=True,
             version_created=False,
-            linked_interaction_id=str(interaction.id),
+            linked_interaction_id=str(interaction.interaction_id),
             details={
                 **create_result.details,
                 'related_to': related_to_id,

@@ -250,7 +250,7 @@ class TestStatusUpdates:
                 tenant_id=tenant_uuid,
                 account_id=account_id,
             )
-            initial_item = next((i for i in items_before if i['id'] == created_id), None)
+            initial_item = next((i for i in items_before if i['action_item_id'] == created_id), None)
             print(f"\nInitial status: {initial_item['status'] if initial_item else 'not found'}")
 
             # Second: mark it complete
@@ -271,7 +271,7 @@ class TestStatusUpdates:
             )
 
             # Find the original item
-            updated_item = next((i for i in items_after if i['id'] == created_id), None)
+            updated_item = next((i for i in items_after if i['action_item_id'] == created_id), None)
             if updated_item:
                 print(f"Final status: {updated_item['status']}")
                 # Status might be 'completed' if matching worked
@@ -347,8 +347,8 @@ class TestMultiTenancyIsolation:
             assert len(items_b) >= 1
 
             # IDs should be different
-            ids_a = {i['id'] for i in items_a}
-            ids_b = {i['id'] for i in items_b}
+            ids_a = {i['action_item_id'] for i in items_a}
+            ids_b = {i['action_item_id'] for i in items_b}
             assert ids_a.isdisjoint(ids_b), "Tenant items should not overlap"
 
         finally:

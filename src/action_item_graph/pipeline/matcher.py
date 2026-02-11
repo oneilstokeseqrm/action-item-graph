@@ -177,7 +177,7 @@ class ActionItemMatcher:
         for result in raw_results:
             candidates.append(
                 MatchCandidate(
-                    action_item_id=result['node']['id'],
+                    action_item_id=result['node']['action_item_id'],
                     node_properties=result['node'],
                     similarity_score=result['score'],
                     # Note: search_both_embeddings combines results, so we can't

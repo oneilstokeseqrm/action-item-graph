@@ -19,7 +19,7 @@ This document provides detailed API documentation for all public classes and fun
   - [EnvelopeV1](#envelopev1)
   - [ActionItem](#actionitem)
   - [ExtractedActionItem](#extractedactionitem)
-  - [Topic](#topic)
+  - [ActionItemTopic](#actionitemtopic)
   - [ExtractedTopic](#extractedtopic)
 - [Clients](#clients)
   - [Neo4jClient](#neo4jclient)
@@ -436,12 +436,12 @@ async def vector_search(
 
 ##### `create_topic()`
 
-Create a new topic node.
+Create a new ActionItemTopic node.
 
 ```python
 async def create_topic(
     self,
-    topic: Topic,
+    topic: ActionItemTopic,
     account_id: str,
 ) -> str:
 ```
@@ -614,14 +614,14 @@ class ExtractedActionItem(BaseModel):
 
 ---
 
-### Topic
+### ActionItemTopic
 
-Pydantic model for topic data.
+Pydantic model for topic data. Persisted as `:ActionItemTopic` nodes in Neo4j.
 
 ```python
-from action_item_graph.models import Topic
+from action_item_graph.models import ActionItemTopic
 
-topic = Topic(
+topic = ActionItemTopic(
     id=uuid4(),
     tenant_id=UUID("..."),
     account_id="acct_xyz",
@@ -638,7 +638,7 @@ topic = Topic(
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `id` | UUID | Unique identifier |
+| `id` | UUID | Unique identifier (stored as `action_item_topic_id` in Neo4j) |
 | `tenant_id` | UUID | Tenant for isolation |
 | `account_id` | str | Account association |
 | `name` | str | Display name (3-5 words) |

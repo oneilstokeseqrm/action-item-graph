@@ -259,7 +259,7 @@ class ActionItemPipeline:
                 with timer.stage("extraction"):
                     extraction = await self.extractor.extract_from_envelope(envelope)
 
-                result.interaction_id = str(extraction.interaction.id)
+                result.interaction_id = str(extraction.interaction.interaction_id)
                 result.total_extracted = extraction.count
                 result.total_new_items = len(extraction.new_items)
                 result.total_status_updates = len(extraction.status_updates)
@@ -436,7 +436,7 @@ class ActionItemPipeline:
                     participants=participants,
                 )
 
-            result.interaction_id = str(extraction.interaction.id)
+            result.interaction_id = str(extraction.interaction.interaction_id)
             result.total_extracted = extraction.count
             result.total_new_items = len(extraction.new_items)
             result.total_status_updates = len(extraction.status_updates)

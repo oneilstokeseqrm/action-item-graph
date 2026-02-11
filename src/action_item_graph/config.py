@@ -25,10 +25,10 @@ class Config:
     OPENAI_EMBEDDING_MODEL: str = os.getenv('OPENAI_EMBEDDING_MODEL', 'text-embedding-3-small')
     OPENAI_EMBEDDING_DIMENSIONS: int = int(os.getenv('OPENAI_EMBEDDING_DIMENSIONS', '1536'))
 
-    # Neo4j
-    NEO4J_URI: str = os.getenv('NEO4J_URI', '')
+    # Neo4j — primary reads NEO4J_ vars, falls back to DEAL_ vars for shared DB compat
+    NEO4J_URI: str = os.getenv('NEO4J_URI', '') or os.getenv('DEAL_NEO4J_URI', '')
     NEO4J_USERNAME: str = os.getenv('NEO4J_USERNAME', 'neo4j')
-    NEO4J_PASSWORD: str = os.getenv('NEO4J_PASSWORD', '')
+    NEO4J_PASSWORD: str = os.getenv('NEO4J_PASSWORD', '') or os.getenv('DEAL_NEO4J_PASSWORD', '')
     NEO4J_DATABASE: str = os.getenv('NEO4J_DATABASE', 'neo4j')
 
     # Pipeline

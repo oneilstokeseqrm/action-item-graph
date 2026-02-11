@@ -27,7 +27,7 @@ class Account(BaseModel):
     This is the primary aggregation point for CRM data.
     """
 
-    id: str = Field(..., description='Account identifier (e.g., acct_acme_corp_001)')
+    account_id: str = Field(..., description='Account identifier (e.g., acct_acme_corp_001)')
     tenant_id: UUID = Field(..., description='Tenant/organization UUID')
 
     # Account details
@@ -48,7 +48,7 @@ class Account(BaseModel):
     def to_neo4j_properties(self) -> dict[str, Any]:
         """Convert to Neo4j-compatible property dict."""
         props = {
-            'id': self.id,
+            'account_id': self.account_id,
             'tenant_id': str(self.tenant_id),
             'name': self.name,
             'domain': self.domain,
@@ -81,17 +81,17 @@ class Interaction(BaseModel):
     - ActionItem (via EXTRACTED_FROM, incoming from ActionItem)
     """
 
-    id: UUID = Field(default_factory=uuid4, description='Unique interaction identifier')
+    interaction_id: UUID = Field(default_factory=uuid4, description='Unique interaction identifier')
     tenant_id: UUID = Field(..., description='Tenant/organization UUID')
     account_id: str | None = Field(default=None, description='Parent account identifier')
 
     # Content
     interaction_type: InteractionType = Field(..., description='Type of interaction')
     title: str | None = Field(default=None, description='Meeting title or subject')
-    transcript_text: str = Field(..., description='Full text content of the interaction')
+    content_text: str = Field(..., description='Full text content of the interaction')
 
     # Timing
-    occurred_at: datetime = Field(..., description='When the interaction took place')
+    timestamp: datetime = Field(..., description='When the interaction took place')
     duration_seconds: int | None = Field(default=None, description='Duration in seconds')
 
     # Provenance
@@ -123,13 +123,13 @@ class Interaction(BaseModel):
             else self.interaction_type
         )
         props = {
-            'id': str(self.id),
+            'interaction_id': str(self.interaction_id),
             'tenant_id': str(self.tenant_id),
             'account_id': self.account_id,
             'interaction_type': interaction_type_value,
             'title': self.title,
-            'transcript_text': self.transcript_text,
-            'occurred_at': self.occurred_at.isoformat(),
+            'content_text': self.content_text,
+            'timestamp': self.timestamp.isoformat(),
             'duration_seconds': self.duration_seconds,
             'source': self.source,
             'user_id': self.user_id,
@@ -176,7 +176,7 @@ class Owner(BaseModel):
     def to_neo4j_properties(self) -> dict[str, Any]:
         """Convert to Neo4j-compatible property dict."""
         return {
-            'id': str(self.id),
+            'owner_id': str(self.id),
             'tenant_id': str(self.tenant_id),
             'canonical_name': self.canonical_name,
             'aliases': self.aliases,
@@ -212,7 +212,7 @@ class Contact(BaseModel):
     def to_neo4j_properties(self) -> dict[str, Any]:
         """Convert to Neo4j-compatible property dict."""
         props = {
-            'id': self.id,
+            'contact_id': self.id,
             'tenant_id': str(self.tenant_id),
             'account_id': self.account_id,
             'name': self.name,

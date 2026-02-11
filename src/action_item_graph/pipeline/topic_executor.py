@@ -15,7 +15,7 @@ from uuid import UUID, uuid4
 
 from ..clients.openai_client import OpenAIClient
 from ..logging import get_logger
-from ..models.topic import Topic
+from ..models.topic import ActionItemTopic
 from ..prompts.topic_prompts import (
     TopicSummary,
     build_topic_summary_create_prompt,
@@ -169,13 +169,13 @@ class TopicExecutor:
             topic_context=extracted.context,
         )
 
-        # Create the Topic model
-        topic = Topic(
+        # Create the ActionItemTopic model
+        topic = ActionItemTopic(
             id=uuid4(),
             tenant_id=tenant_id,
             account_id=account_id,
             name=extracted.name,
-            canonical_name=Topic.canonicalize_name(extracted.name),
+            canonical_name=ActionItemTopic.canonicalize_name(extracted.name),
             summary=summary_result.summary,
             embedding=resolution.embedding,
             embedding_current=resolution.embedding,  # Same initially

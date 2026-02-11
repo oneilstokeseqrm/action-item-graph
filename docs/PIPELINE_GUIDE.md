@@ -468,8 +468,8 @@ Relationships carry metadata:
 (:ActionItem)-[:BELONGS_TO {
     confidence: 0.92,           # How confident the match
     method: "resolved",         # "extracted", "resolved", "manual"
-    created_at: datetime()      # When linked
-}]->(:Topic)
+    timestamp: datetime()       # When linked
+}]->(:ActionItemTopic)
 
 (:ActionItem)-[:EXTRACTED_FROM {
     is_source: true,            # Original extraction source
@@ -481,20 +481,20 @@ Relationships carry metadata:
 
 ```cypher
 -- Uniqueness constraints (primary keys)
-CREATE CONSTRAINT action_item_id_unique FOR (n:ActionItem) REQUIRE n.id IS UNIQUE
-CREATE CONSTRAINT topic_id_unique FOR (n:Topic) REQUIRE n.id IS UNIQUE
+CREATE CONSTRAINT action_item_id_unique FOR (n:ActionItem) REQUIRE (n.tenant_id, n.action_item_id) IS NODE KEY
+CREATE CONSTRAINT action_item_topic_id_unique FOR (n:ActionItemTopic) REQUIRE (n.tenant_id, n.action_item_topic_id) IS NODE KEY
 
 -- Query performance indexes
 CREATE INDEX action_item_tenant_idx FOR (n:ActionItem) ON (n.tenant_id)
 CREATE INDEX action_item_account_idx FOR (n:ActionItem) ON (n.account_id)
-CREATE INDEX topic_tenant_idx FOR (n:Topic) ON (n.tenant_id)
-CREATE INDEX topic_account_idx FOR (n:Topic) ON (n.account_id)
+CREATE INDEX action_item_topic_tenant_idx FOR (n:ActionItemTopic) ON (n.tenant_id)
+CREATE INDEX action_item_topic_account_idx FOR (n:ActionItemTopic) ON (n.account_id)
 
 -- Vector indexes (1536 dimensions, cosine similarity)
 CREATE VECTOR INDEX action_item_embedding_idx FOR (n:ActionItem) ON (n.embedding)
 CREATE VECTOR INDEX action_item_embedding_current_idx FOR (n:ActionItem) ON (n.embedding_current)
-CREATE VECTOR INDEX topic_embedding_idx FOR (n:Topic) ON (n.embedding)
-CREATE VECTOR INDEX topic_embedding_current_idx FOR (n:Topic) ON (n.embedding_current)
+CREATE VECTOR INDEX action_item_topic_embedding_idx FOR (n:ActionItemTopic) ON (n.embedding)
+CREATE VECTOR INDEX action_item_topic_embedding_current_idx FOR (n:ActionItemTopic) ON (n.embedding_current)
 ```
 
 ---

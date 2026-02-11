@@ -48,7 +48,7 @@ class TestAccountOperations:
             )
 
             print(f"\nCreated account: {account}")
-            assert account['id'] == account_id
+            assert account['account_id'] == account_id
             assert account['tenant_id'] == sample_tenant_id
             assert account['name'] == "Test Company Inc"
 
@@ -84,9 +84,9 @@ class TestAccountOperations:
                 name="Different Name",
             )
 
-            assert account1['id'] == account2['id']
+            assert account1['account_id'] == account2['account_id']
             assert account2['name'] == "Original Name"  # Name not changed
-            print(f"\nIdempotent ensure returned same account: {account2['id']}")
+            print(f"\nIdempotent ensure returned same account: {account2['account_id']}")
 
         finally:
             await neo4j.close()
@@ -118,19 +118,19 @@ class TestInteractionOperations:
             # Create interaction
             interaction_id = uuid.uuid4()
             interaction = Interaction(
-                id=interaction_id,
+                interaction_id=interaction_id,
                 tenant_id=tenant_uuid,
                 account_id=sample_account_id,
                 interaction_type=InteractionType.TRANSCRIPT,
                 title="Q1 Review Call",
-                transcript_text="Discussion about Q1 results...",
-                occurred_at=datetime.now(),
+                content_text="Discussion about Q1 results...",
+                timestamp=datetime.now(),
             )
 
             created = await repo.create_interaction(interaction)
 
-            print(f"\nCreated interaction: {created['id']}")
-            assert created['id'] == str(interaction_id)
+            print(f"\nCreated interaction: {created['interaction_id']}")
+            assert created['interaction_id'] == str(interaction_id)
             assert created['title'] == "Q1 Review Call"
 
         finally:
@@ -183,8 +183,8 @@ class TestActionItemOperations:
 
             created = await repo.create_action_item(item)
 
-            print(f"\nCreated ActionItem: {created['id']}")
-            assert created['id'] == str(item_id)
+            print(f"\nCreated ActionItem: {created['action_item_id']}")
+            assert created['action_item_id'] == str(item_id)
             assert created['summary'] == "Schedule team follow-up meeting"
             assert created['embedding'] is not None
 
@@ -340,12 +340,12 @@ class TestRelationships:
             # Create interaction
             interaction_id = uuid.uuid4()
             interaction = Interaction(
-                id=interaction_id,
+                interaction_id=interaction_id,
                 tenant_id=tenant_uuid,
                 account_id=sample_account_id,
                 interaction_type=InteractionType.TRANSCRIPT,
-                transcript_text="Test transcript",
-                occurred_at=datetime.now(),
+                content_text="Test transcript",
+                timestamp=datetime.now(),
             )
             await repo.create_interaction(interaction)
 
@@ -439,8 +439,8 @@ class TestOwnerResolution:
                 owner_name=unique_name,
             )
 
-            assert owner1['id'] == owner2['id']
-            print(f"\nResolved to same owner: {owner2['id']}")
+            assert owner1['owner_id'] == owner2['owner_id']
+            print(f"\nResolved to same owner: {owner2['owner_id']}")
 
         finally:
             await neo4j.close()
@@ -503,10 +503,10 @@ class TestOwnerResolution:
             print(f"Owner 2 canonical_name: {owner2.get('canonical_name')}")
 
             # Should be same owner (full_name CONTAINS partial_name)
-            assert owner1['id'] == owner2['id'], (
+            assert owner1['owner_id'] == owner2['owner_id'], (
                 f"Expected partial name search to match existing owner. "
                 f"Full name: {full_name}, Partial: {partial_name}, "
-                f"Owner1 ID: {owner1['id']}, Owner2 ID: {owner2['id']}"
+                f"Owner1 ID: {owner1['owner_id']}, Owner2 ID: {owner2['owner_id']}"
             )
 
             # Check that alias was added

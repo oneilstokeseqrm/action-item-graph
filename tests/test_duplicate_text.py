@@ -88,12 +88,12 @@ class TestDuplicateTextMerges:
         ai_b = _make_action_item(item_id=id_b, tenant_id=tenant_id, text=same_text, owner='Bob')
 
         interaction = Interaction(
-            id=uuid.uuid4(),
+            interaction_id=uuid.uuid4(),
             tenant_id=tenant_id,
             account_id='acct_test',
             interaction_type=InteractionType.TRANSCRIPT,
-            transcript_text='test',
-            occurred_at=datetime.now(tz=timezone.utc),
+            content_text='test',
+            timestamp=datetime.now(tz=timezone.utc),
         )
 
         match_a = _make_match_result(same_text, owner='Alice')
@@ -108,7 +108,7 @@ class TestDuplicateTextMerges:
                 action_item_id=str(id_a),
                 was_new=True,
                 version_created=False,
-                linked_interaction_id=str(interaction.id),
+                linked_interaction_id=str(interaction.interaction_id),
                 details={},
             ),
             MergeResult(
@@ -116,7 +116,7 @@ class TestDuplicateTextMerges:
                 action_item_id=str(id_b),
                 was_new=True,
                 version_created=False,
-                linked_interaction_id=str(interaction.id),
+                linked_interaction_id=str(interaction.interaction_id),
                 details={},
             ),
         ]
@@ -148,12 +148,12 @@ class TestDuplicateTextMerges:
         ai = _make_action_item(item_id=item_id, tenant_id=tenant_id, text='Send the report')
 
         interaction = Interaction(
-            id=uuid.uuid4(),
+            interaction_id=uuid.uuid4(),
             tenant_id=tenant_id,
             account_id='acct_test',
             interaction_type=InteractionType.TRANSCRIPT,
-            transcript_text='test',
-            occurred_at=datetime.now(tz=timezone.utc),
+            content_text='test',
+            timestamp=datetime.now(tz=timezone.utc),
         )
 
         match = _make_match_result('Send the report')
@@ -165,7 +165,7 @@ class TestDuplicateTextMerges:
             action_item_id=str(item_id),
             was_new=True,
             version_created=False,
-            linked_interaction_id=str(interaction.id),
+            linked_interaction_id=str(interaction.interaction_id),
             details={},
         )
 
@@ -192,12 +192,12 @@ class TestDuplicateTextMerges:
         match_results = [_make_match_result(same_text) for _ in range(3)]
 
         interaction = Interaction(
-            id=uuid.uuid4(),
+            interaction_id=uuid.uuid4(),
             tenant_id=tenant_id,
             account_id='acct_test',
             interaction_type=InteractionType.TRANSCRIPT,
-            transcript_text='test',
-            occurred_at=datetime.now(tz=timezone.utc),
+            content_text='test',
+            timestamp=datetime.now(tz=timezone.utc),
         )
 
         pipeline = ActionItemPipeline.__new__(ActionItemPipeline)
@@ -208,7 +208,7 @@ class TestDuplicateTextMerges:
                 action_item_id=str(uid),
                 was_new=True,
                 version_created=False,
-                linked_interaction_id=str(interaction.id),
+                linked_interaction_id=str(interaction.interaction_id),
                 details={},
             )
             for uid in ids

@@ -1,5 +1,5 @@
 """
-Topic and TopicVersion models for grouping action items into high-level themes.
+ActionItemTopic and ActionItemTopicVersion models for grouping action items into high-level themes.
 
 Topics enable users to retrieve the full "story" of a project across conversations
 by clustering related action items into shared themes (e.g., "Q3 Audit", "Website Redesign").
@@ -9,6 +9,9 @@ Key features:
 - Version tracking for summary evolution
 - Multi-tenant isolation via tenant_id
 - Account scoping via account_id
+
+Note: Renamed from Topic/TopicVersion to avoid label collision with the structured
+graph's Topic nodes (which represent semantic labels extracted from interaction text).
 """
 
 from datetime import datetime
@@ -18,14 +21,14 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, Field
 
 
-class Topic(BaseModel):
+class ActionItemTopic(BaseModel):
     """
     High-level theme/project that groups related action items.
 
-    The Topic node connects:
+    The ActionItemTopic node connects:
     - To Account via HAS_TOPIC relationship
     - To ActionItem(s) via BELONGS_TO relationship (action item -> topic)
-    - To TopicVersion(s) via HAS_VERSION relationship
+    - To ActionItemTopicVersion(s) via HAS_VERSION relationship
 
     Embeddings:
     - embedding: Original embedding (immutable, from first creation)
@@ -106,7 +109,7 @@ class Topic(BaseModel):
         UUIDs are converted to strings for Neo4j compatibility.
         """
         props = {
-            'id': str(self.id),
+            'action_item_topic_id': str(self.id),
             'tenant_id': str(self.tenant_id),
             'account_id': self.account_id,
             'name': self.name,
@@ -139,11 +142,11 @@ class Topic(BaseModel):
         return ' '.join(name.lower().strip().split())
 
 
-class TopicVersion(BaseModel):
+class ActionItemTopicVersion(BaseModel):
     """
-    Historical snapshot of a Topic at a specific point in time.
+    Historical snapshot of an ActionItemTopic at a specific point in time.
 
-    Created whenever a Topic summary is updated, preserving the full state
+    Created whenever a topic summary is updated, preserving the full state
     before the update. This enables:
     - Full audit trail of topic evolution
     - Understanding how topic scope has changed
@@ -152,7 +155,7 @@ class TopicVersion(BaseModel):
 
     # Identity
     id: UUID = Field(default_factory=uuid4, description='Unique identifier for this version')
-    topic_id: UUID = Field(..., description='The parent Topic this version belongs to')
+    topic_id: UUID = Field(..., description='The parent ActionItemTopic this version belongs to')
 
     # Multi-tenancy
     tenant_id: UUID = Field(..., description='Tenant/organization UUID')
@@ -183,7 +186,7 @@ class TopicVersion(BaseModel):
     def to_neo4j_properties(self) -> dict[str, Any]:
         """Convert to Neo4j-compatible property dict."""
         props = {
-            'id': str(self.id),
+            'version_id': str(self.id),
             'topic_id': str(self.topic_id),
             'tenant_id': str(self.tenant_id),
             'version_number': self.version_number,
@@ -203,7 +206,7 @@ class ExtractedTopic(BaseModel):
     A topic extracted alongside an action item from a transcript.
 
     This is the intermediate representation used during extraction,
-    before being resolved to an existing Topic or creating a new one.
+    before being resolved to an existing ActionItemTopic or creating a new one.
     """
 
     name: str = Field(

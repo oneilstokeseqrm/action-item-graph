@@ -4,7 +4,8 @@ Live E2E smoke test for the dual-pipeline EnvelopeDispatcher.
 
 Runs transcripts from examples/transcripts/transcripts.json through the full
 dispatcher, exercising both the Action Item pipeline and the Deal pipeline
-concurrently — the same path production traffic follows.
+concurrently against a single shared Neo4j database — the same path
+production traffic follows.
 
 See docs/LIVE_E2E_TEST_RESULTS.md for the validation record.
 
@@ -83,40 +84,22 @@ def build_envelope(transcript: dict, tenant_id: UUID, account_id: str) -> Envelo
 # =============================================================================
 
 
-async def clean_ai_database(neo4j: Neo4jClient, tenant_id: str):
-    """Clean all AI pipeline test data for this tenant."""
-    print("\n--- Cleaning AI database ---")
+async def clean_database(neo4j: Neo4jClient, tenant_id: str):
+    """Clean all pipeline test data for this tenant (single shared database).
 
+    Deletes enrichment labels first (versions, then entities), then skeleton
+    labels (Interaction, Account) last — respecting relationship ordering.
+    """
+    print("\n--- Cleaning shared database ---")
+
+    # Order: versions first, then entities, then skeleton (Interaction, Account)
     queries = [
         "MATCH (n:ActionItemVersion) WHERE n.tenant_id = $tenant_id DETACH DELETE n",
-        "MATCH (n:TopicVersion) WHERE n.tenant_id = $tenant_id DETACH DELETE n",
-        "MATCH (n:ActionItem) WHERE n.tenant_id = $tenant_id DETACH DELETE n",
-        "MATCH (n:Topic) WHERE n.tenant_id = $tenant_id DETACH DELETE n",
-        "MATCH (n:Owner) WHERE n.tenant_id = $tenant_id DETACH DELETE n",
-        "MATCH (n:Interaction) WHERE n.tenant_id = $tenant_id DETACH DELETE n",
-        "MATCH (n:Account) WHERE n.tenant_id = $tenant_id DETACH DELETE n",
-    ]
-
-    for query in queries:
-        await neo4j.execute_write(query, {'tenant_id': tenant_id})
-
-    # Verify clean state
-    result = await neo4j.execute_query(
-        "MATCH (n) WHERE n.tenant_id = $tenant_id RETURN count(n) as count",
-        {'tenant_id': tenant_id},
-    )
-    remaining = result[0]['count'] if result else 0
-    print(f"  AI database: deleted all nodes for tenant ({remaining} remaining)")
-    if remaining > 0:
-        raise RuntimeError(f"AI database cleanup failed — {remaining} nodes remain")
-
-
-async def clean_deal_database(neo4j: DealNeo4jClient, tenant_id: str):
-    """Clean all Deal pipeline test data for this tenant."""
-    print("--- Cleaning Deal database ---")
-
-    queries = [
+        "MATCH (n:ActionItemTopicVersion) WHERE n.tenant_id = $tenant_id DETACH DELETE n",
         "MATCH (n:DealVersion) WHERE n.tenant_id = $tenant_id DETACH DELETE n",
+        "MATCH (n:ActionItem) WHERE n.tenant_id = $tenant_id DETACH DELETE n",
+        "MATCH (n:ActionItemTopic) WHERE n.tenant_id = $tenant_id DETACH DELETE n",
+        "MATCH (n:Owner) WHERE n.tenant_id = $tenant_id DETACH DELETE n",
         "MATCH (n:Deal) WHERE n.tenant_id = $tenant_id DETACH DELETE n",
         "MATCH (n:Interaction) WHERE n.tenant_id = $tenant_id DETACH DELETE n",
         "MATCH (n:Account) WHERE n.tenant_id = $tenant_id DETACH DELETE n",
@@ -125,15 +108,22 @@ async def clean_deal_database(neo4j: DealNeo4jClient, tenant_id: str):
     for query in queries:
         await neo4j.execute_write(query, {'tenant_id': tenant_id})
 
-    # Verify clean state
+    # Verify clean state — only check labels we own (skeleton labels like
+    # Entity, Topic, Community, Chunk etc. belong to upstream eq-structured-graph-core)
+    our_labels = [
+        'ActionItemVersion', 'ActionItemTopicVersion', 'DealVersion',
+        'ActionItem', 'ActionItemTopic', 'Owner', 'Deal',
+        'Interaction', 'Account',
+    ]
+    label_filter = ' OR '.join(f'n:{label}' for label in our_labels)
     result = await neo4j.execute_query(
-        "MATCH (n) WHERE n.tenant_id = $tenant_id RETURN count(n) as count",
+        f"MATCH (n) WHERE n.tenant_id = $tenant_id AND ({label_filter}) RETURN count(n) as count",
         {'tenant_id': tenant_id},
     )
     remaining = result[0]['count'] if result else 0
-    print(f"  Deal database: deleted all nodes for tenant ({remaining} remaining)")
+    print(f"  Shared database: cleaned pipeline labels ({remaining} remaining)")
     if remaining > 0:
-        raise RuntimeError(f"Deal database cleanup failed — {remaining} nodes remain")
+        raise RuntimeError(f"Database cleanup failed — {remaining} pipeline nodes remain")
 
 
 # =============================================================================
@@ -311,11 +301,11 @@ async def query_ai_final_state(neo4j: Neo4jClient, tenant_id: str, account_id: s
     MATCH (ai:ActionItem)
     WHERE ai.tenant_id = $tenant_id AND ai.account_id = $account_id
     OPTIONAL MATCH (ai)-[:OWNED_BY]->(o:Owner)
-    OPTIONAL MATCH (ai)-[:BELONGS_TO]->(t:Topic)
+    OPTIONAL MATCH (ai)-[:BELONGS_TO]->(t:ActionItemTopic)
     OPTIONAL MATCH (ai)-[:EXTRACTED_FROM]->(i:Interaction)
     WITH ai, o.canonical_name as resolved_owner, t.name as topic_name,
          collect(DISTINCT i.title) as source_interactions
-    RETURN ai.id as id,
+    RETURN ai.action_item_id as action_item_id,
            ai.summary as summary,
            ai.owner as owner,
            ai.status as status,
@@ -329,16 +319,16 @@ async def query_ai_final_state(neo4j: Neo4jClient, tenant_id: str, account_id: s
         'account_id': account_id,
     })
 
-    for i, ai in enumerate(action_items, 1):
+    for idx, ai in enumerate(action_items, 1):
         sources = ', '.join(ai['source_interactions']) if ai['source_interactions'] else 'None'
-        print(f"  {i}. {ai['summary']}")
+        print(f"  {idx}. {ai['summary']}")
         print(f"     Owner: {ai['owner']} | Topic: {ai['topic_name'] or 'None'} | Source: {sources}")
 
     print(f"  Total Action Items: {len(action_items)}")
 
     # Topics
     topic_query = """
-    MATCH (t:Topic)
+    MATCH (t:ActionItemTopic)
     WHERE t.tenant_id = $tenant_id AND t.account_id = $account_id
     OPTIONAL MATCH (ai:ActionItem)-[:BELONGS_TO]->(t)
     WITH t.name as name, t.action_item_count as count, collect(ai.summary) as linked_items
@@ -381,9 +371,9 @@ async def query_ai_final_state(neo4j: Neo4jClient, tenant_id: str, account_id: s
     MATCH (i:Interaction)
     WHERE i.tenant_id = $tenant_id AND i.account_id = $account_id
     OPTIONAL MATCH (ai:ActionItem)-[:EXTRACTED_FROM]->(i)
-    WITH i.title as title, i.occurred_at as occurred_at, count(ai) as action_item_count
-    RETURN title, occurred_at, action_item_count
-    ORDER BY occurred_at
+    WITH i.title as title, i.timestamp as timestamp, count(ai) as action_item_count
+    RETURN title, timestamp, action_item_count
+    ORDER BY timestamp
     """
     interactions = await neo4j.execute_query(int_query, {
         'tenant_id': tenant_id,
@@ -552,6 +542,141 @@ async def query_deal_final_state(
 
 
 # =============================================================================
+# Cross-Pipeline MERGE Verification
+# =============================================================================
+
+
+async def verify_cross_pipeline_merge(
+    neo4j: Neo4jClient,
+    tenant_id: str,
+    account_id: str,
+    all_results: list[dict],
+) -> bool:
+    """Verify that both pipelines MERGEd onto the same Account and Interaction nodes.
+
+    This is the core integration thesis: two pipelines writing to one shared
+    database must converge on shared labels (Account, Interaction) rather than
+    creating duplicates. We check:
+
+    1. Exactly ONE Account node exists for this account_id (MERGE, not CREATE).
+    2. Each Interaction has enrichment from BOTH pipelines:
+       - action_item_count (set by ActionItemPipeline)
+       - deal_count (set by DealPipeline)
+    3. The key properties (account_id, interaction_id) are present and correct.
+    """
+    print(f"\n{'=' * 70}")
+    print("CROSS-PIPELINE MERGE VERIFICATION")
+    print("=" * 70)
+
+    passed = True
+
+    # --- 1. Account convergence ---
+    acct_result = await neo4j.execute_query(
+        """
+        MATCH (a:Account {tenant_id: $tenant_id, account_id: $account_id})
+        RETURN a.account_id AS account_id,
+               a.tenant_id AS tenant_id,
+               a.name AS name,
+               a.created_at AS created_at
+        """,
+        {'tenant_id': tenant_id, 'account_id': account_id},
+    )
+
+    acct_count = len(acct_result)
+    if acct_count == 1:
+        acct = acct_result[0]
+        print(f"\n  [PASS] Account: exactly 1 node (MERGE convergence confirmed)")
+        print(f"         account_id = {acct['account_id']}")
+        print(f"         tenant_id  = {acct['tenant_id']}")
+        print(f"         name       = {acct['name']}")
+    elif acct_count == 0:
+        print(f"\n  [FAIL] Account: 0 nodes found for account_id={account_id}")
+        passed = False
+    else:
+        print(f"\n  [FAIL] Account: {acct_count} nodes found — MERGE created duplicates!")
+        passed = False
+
+    # --- 2. Interaction convergence ---
+    print(f"\n  Interactions (both pipelines should enrich the same node):")
+
+    interaction_pass_count = 0
+    for r in sorted(all_results, key=lambda x: x['sequence']):
+        iid = r['interaction_id']
+        title = r['meeting_title']
+
+        int_result = await neo4j.execute_query(
+            """
+            MATCH (i:Interaction {tenant_id: $tenant_id, interaction_id: $iid})
+            RETURN i.interaction_id AS interaction_id,
+                   i.account_id AS account_id,
+                   i.action_item_count AS action_item_count,
+                   i.deal_count AS deal_count,
+                   i.interaction_type AS interaction_type,
+                   i.content_text IS NOT NULL AS has_content,
+                   i.timestamp IS NOT NULL AS has_timestamp,
+                   i.processed_at IS NOT NULL AS has_processed_at
+            """,
+            {'tenant_id': tenant_id, 'iid': iid},
+        )
+
+        node_count = len(int_result)
+        if node_count == 0:
+            print(f"    [FAIL] {title}: Interaction {iid[:12]}... NOT FOUND")
+            passed = False
+            continue
+        if node_count > 1:
+            print(f"    [FAIL] {title}: {node_count} nodes — MERGE created duplicates!")
+            passed = False
+            continue
+
+        i = int_result[0]
+        ai_count = i.get('action_item_count')
+        deal_count = i.get('deal_count')
+
+        ai_ok = ai_count is not None
+        deal_ok = deal_count is not None
+
+        if ai_ok and deal_ok:
+            status = "PASS"
+            interaction_pass_count += 1
+        elif ai_ok:
+            status = "PARTIAL"
+            detail = "AI pipeline wrote, Deal pipeline did not"
+        elif deal_ok:
+            status = "PARTIAL"
+            detail = "Deal pipeline wrote, AI pipeline did not"
+        else:
+            status = "FAIL"
+            detail = "Neither pipeline enriched this node"
+            passed = False
+
+        print(f"    [{status}] {title}: interaction_id={i['interaction_id'][:12]}...")
+        print(f"           account_id={i['account_id']}  "
+              f"action_item_count={ai_count}  deal_count={deal_count}")
+        print(f"           has_content={i['has_content']}  "
+              f"has_timestamp={i['has_timestamp']}  "
+              f"has_processed_at={i['has_processed_at']}")
+        if status == "PARTIAL":
+            print(f"           Note: {detail}")
+
+    # --- 3. Summary ---
+    total = len(all_results)
+    print(f"\n  Summary: {interaction_pass_count}/{total} interactions enriched by both pipelines")
+
+    if passed and interaction_pass_count == total:
+        print(f"\n  [PASS] Cross-pipeline MERGE verification: ALL CHECKS PASSED")
+        print(f"         Both pipelines converged on shared Account and Interaction nodes.")
+    elif passed:
+        print(f"\n  [WARN] Cross-pipeline MERGE verification: partial enrichment")
+        print(f"         Nodes converged (no duplicates), but not all Interactions "
+              f"were enriched by both pipelines.")
+    else:
+        print(f"\n  [FAIL] Cross-pipeline MERGE verification: FAILURES DETECTED")
+
+    return passed
+
+
+# =============================================================================
 # Summary Report
 # =============================================================================
 
@@ -655,7 +780,7 @@ async def main():
     transcripts = sorted(data['transcripts'], key=lambda x: x['sequence'])
 
     print("=" * 70)
-    print("LIVE E2E SMOKE TEST — DUAL-PIPELINE DISPATCHER")
+    print("LIVE E2E SMOKE TEST — DUAL-PIPELINE DISPATCHER (SHARED DATABASE)")
     print("=" * 70)
     print(f"Account: {account_name}")
     print(f"Tenant ID: {tenant_id}")
@@ -686,25 +811,24 @@ async def main():
         # Connect and set up schemas
         await ai_neo4j.connect()
         await ai_neo4j.setup_schema()
-        print("AI database: connected and schema ready")
+        print("AI pipeline: connected and schema ready")
 
         await deal_neo4j.connect()
         await deal_neo4j.setup_schema()
-        print("Deal database: connected and enrichment schema ready")
+        print("Deal pipeline: connected and enrichment schema ready")
 
         try:
             await deal_neo4j.verify_skeleton_schema()
-            print("Deal database: skeleton schema verified")
+            print("Shared database: skeleton schema verified")
         except RuntimeError as e:
             print(f"WARNING: Skeleton schema verification failed: {e}")
             print("Continuing anyway — MERGE-based operations may still work.")
 
-        # Clean both databases
+        # Clean shared database
         print(f"\n{'=' * 70}")
-        print("CLEANING DATABASES")
+        print("CLEANING SHARED DATABASE")
         print("=" * 70)
-        await clean_ai_database(ai_neo4j, tenant_id_str)
-        await clean_deal_database(deal_neo4j, tenant_id_str)
+        await clean_database(ai_neo4j, tenant_id_str)
 
         # Build pipelines and dispatcher
         ai_pipeline = ActionItemPipeline(openai, ai_neo4j, enable_topics=True)
@@ -739,6 +863,11 @@ async def main():
         print("=" * 70)
         ai_state = await query_ai_final_state(ai_neo4j, tenant_id_str, account_id)
         deal_state = await query_deal_final_state(deal_neo4j, tenant_id_str, account_id, all_results)
+
+        # Verify cross-pipeline MERGE convergence on shared labels
+        merge_ok = await verify_cross_pipeline_merge(
+            ai_neo4j, tenant_id_str, account_id, all_results,
+        )
 
         # Print comprehensive summary
         print_summary_report(all_results, ai_state, deal_state, data, total_time_ms)

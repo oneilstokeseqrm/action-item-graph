@@ -31,8 +31,8 @@ class Neo4jClient:
     EMBEDDING_DIMENSIONS = 1536
     VECTOR_INDEX_NAME = 'action_item_embedding_idx'
     VECTOR_CURRENT_INDEX_NAME = 'action_item_embedding_current_idx'
-    TOPIC_VECTOR_INDEX_NAME = 'topic_embedding_idx'
-    TOPIC_VECTOR_CURRENT_INDEX_NAME = 'topic_embedding_current_idx'
+    TOPIC_VECTOR_INDEX_NAME = 'action_item_topic_embedding_idx'
+    TOPIC_VECTOR_CURRENT_INDEX_NAME = 'action_item_topic_embedding_current_idx'
 
     def __init__(
         self,
@@ -50,9 +50,9 @@ class Neo4jClient:
             password: Password (defaults to NEO4J_PASSWORD env var)
             database: Database name (defaults to NEO4J_DATABASE or 'neo4j')
         """
-        self.uri = uri or os.getenv('NEO4J_URI')
+        self.uri = uri or os.getenv('NEO4J_URI') or os.getenv('DEAL_NEO4J_URI')
         self.username = username or os.getenv('NEO4J_USERNAME', 'neo4j')
-        self.password = password or os.getenv('NEO4J_PASSWORD')
+        self.password = password or os.getenv('NEO4J_PASSWORD') or os.getenv('DEAL_NEO4J_PASSWORD')
         self.database = database or os.getenv('NEO4J_DATABASE', 'neo4j')
 
         if not self.uri:
@@ -160,69 +160,43 @@ class Neo4jClient:
         """
         Create all necessary constraints and indexes.
 
-        Constraints use tenant-scoped NODE KEY on (tenant_id, id) for
-        multi-tenant isolation.  Migration from older global single-property
-        constraints is handled automatically: new composite constraints are
-        created first, then stale global ones are dropped.
+        Constraints use tenant-scoped UNIQUENESS on action-item-owned labels.
+        Account and Interaction constraints are skeleton-owned (upstream pipeline).
 
         Returns:
             Dict with lists of created constraints and indexes
         """
         created = {'constraints': [], 'indexes': [], 'vector_indexes': []}
 
-        # --- Step 1: Create tenant-scoped NODE KEY constraints -----------
-        # NODE KEY enforces existence + uniqueness of (tenant_id, id).
-        composite_constraints = [
-            ('account_tenant_key', 'Account'),
-            ('interaction_tenant_key', 'Interaction'),
-            ('action_item_tenant_key', 'ActionItem'),
-            ('action_item_version_tenant_key', 'ActionItemVersion'),
-            ('owner_tenant_key', 'Owner'),
-            ('topic_tenant_key', 'Topic'),
-            ('topic_version_tenant_key', 'TopicVersion'),
+        # Uniqueness constraints for action-item-owned labels
+        uniqueness_constraints = [
+            ('action_item_unique', 'ActionItem', 'action_item_id'),
+            ('action_item_version_unique', 'ActionItemVersion', 'version_id'),
+            ('owner_unique', 'Owner', 'owner_id'),
+            ('action_item_topic_unique', 'ActionItemTopic', 'action_item_topic_id'),
+            ('action_item_topic_version_unique', 'ActionItemTopicVersion', 'version_id'),
         ]
 
-        for name, label in composite_constraints:
+        for name, label, prop in uniqueness_constraints:
             try:
                 await self.execute_write(
                     f'CREATE CONSTRAINT {name} IF NOT EXISTS '
-                    f'FOR (n:{label}) REQUIRE (n.tenant_id, n.id) IS NODE KEY'
+                    f'FOR (n:{label}) REQUIRE (n.tenant_id, n.{prop}) IS UNIQUE'
                 )
                 created['constraints'].append(name)
             except Exception as e:
                 if 'already exists' not in str(e).lower():
                     raise
 
-        # --- Step 2: Drop stale global single-property constraints -------
-        # These are superseded by the composite constraints above.
-        # Only covers labels owned by the Action Item pipeline.
-        legacy_constraints = [
-            'account_id_unique',
-            'interaction_id_unique',
-            'action_item_id_unique',
-            'action_item_version_id_unique',
-            'owner_id_unique',
-            'topic_id_unique',
-            'topic_version_id_unique',
-        ]
-
-        for name in legacy_constraints:
-            try:
-                await self.execute_write(f'DROP CONSTRAINT {name} IF EXISTS')
-            except Exception:
-                pass  # already gone
-
         # Regular indexes for common queries
         indexes = [
             ('action_item_tenant_idx', 'ActionItem', 'tenant_id'),
             ('action_item_account_idx', 'ActionItem', 'account_id'),
             ('action_item_status_idx', 'ActionItem', 'status'),
-            ('interaction_tenant_idx', 'Interaction', 'tenant_id'),
-            ('interaction_account_idx', 'Interaction', 'account_id'),
             ('owner_tenant_idx', 'Owner', 'tenant_id'),
-            ('topic_tenant_idx', 'Topic', 'tenant_id'),
-            ('topic_account_idx', 'Topic', 'account_id'),
-            ('topic_canonical_name_idx', 'Topic', 'canonical_name'),
+            ('action_item_topic_tenant_idx', 'ActionItemTopic', 'tenant_id'),
+            ('action_item_topic_account_idx', 'ActionItemTopic', 'account_id'),
+            ('action_item_topic_canonical_name_idx', 'ActionItemTopic', 'canonical_name'),
         ]
 
         for name, label, prop in indexes:
@@ -239,8 +213,8 @@ class Neo4jClient:
         vector_indexes = [
             (self.VECTOR_INDEX_NAME, 'ActionItem', 'embedding'),
             (self.VECTOR_CURRENT_INDEX_NAME, 'ActionItem', 'embedding_current'),
-            (self.TOPIC_VECTOR_INDEX_NAME, 'Topic', 'embedding'),
-            (self.TOPIC_VECTOR_CURRENT_INDEX_NAME, 'Topic', 'embedding_current'),
+            (self.TOPIC_VECTOR_INDEX_NAME, 'ActionItemTopic', 'embedding'),
+            (self.TOPIC_VECTOR_CURRENT_INDEX_NAME, 'ActionItemTopic', 'embedding_current'),
         ]
 
         for name, label, prop in vector_indexes:
@@ -262,6 +236,15 @@ class Neo4jClient:
                     raise
 
         return created
+
+    async def verify_skeleton_schema(self) -> dict[str, bool]:
+        """Verify that skeleton constraints exist (owned by upstream pipeline)."""
+        result = await self.execute_query('SHOW CONSTRAINTS')
+        found = {'account_unique': False, 'interaction_unique': False}
+        for constraint in result:
+            if constraint.get('name') in found:
+                found[constraint['name']] = True
+        return found
 
     async def vector_search(
         self,
@@ -367,7 +350,7 @@ class Neo4jClient:
         seen: dict[str, dict[str, Any]] = {}
 
         for result in original_results + current_results:
-            node_id = result['node']['id']
+            node_id = result['node']['action_item_id']
             if node_id not in seen or result['score'] > seen[node_id]['score']:
                 seen[node_id] = result
 
@@ -498,7 +481,7 @@ class Neo4jClient:
         seen: dict[str, dict[str, Any]] = {}
 
         for result in original_results + current_results:
-            node_id = result['node']['id']
+            node_id = result['node']['action_item_topic_id']
             if node_id not in seen or result['score'] > seen[node_id]['score']:
                 seen[node_id] = result
 
