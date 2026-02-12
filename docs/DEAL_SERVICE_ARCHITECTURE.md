@@ -39,25 +39,24 @@ independently.
 
 ### Shared Neo4j Database
 
-The AI and Deal pipelines write to a **single shared Neo4j Aura instance** with tenant-scoped isolation. Both pipelines use the same database connection and share schema:
+The AI and Deal pipelines write to a **single shared Neo4j Aura instance** with tenant-scoped isolation. Each pipeline uses its own client class but connects to the same database:
 
 | Aspect | Shared DB |
 |--------|-----------|
 | Env vars | `NEO4J_URI`, `NEO4J_PASSWORD` |
-| Client class | `Neo4jClient` (shared) |
-| Schema owner | `Neo4jClient.setup_schema()` |
+| Client classes | `Neo4jClient` (AI pipeline), `DealNeo4jClient` (Deal pipeline) |
+| Schema owners | `Neo4jClient.setup_schema()` (AI labels), `DealNeo4jClient.setup_schema()` (Deal labels) |
 | Node labels | Account, Interaction, ActionItem, ActionItemVersion, Owner, ActionItemTopic, ActionItemTopicVersion, Deal, DealVersion |
 | Vector indexes | 6 (ActionItem + ActionItemTopic + Deal × embedding/embedding_current) |
 
-**What `Neo4jClient.setup_schema()` creates:**
+**What each `setup_schema()` creates:**
 
-All constraints, indexes, and vector indexes for both pipelines are created by the shared schema setup. This includes:
+Each client creates constraints and indexes for the labels it owns. Both methods are idempotent (`IF NOT EXISTS`).
 
-- NODE KEY constraints on `(tenant_id, label_id)` for all entity labels
-- Property indexes for `tenant_id`, `account_id`, `status`, `stage`, etc.
-- Vector indexes for ActionItem, ActionItemTopic, and Deal (both `embedding` and `embedding_current`)
+- `Neo4jClient.setup_schema()` — UNIQUENESS constraints on `(tenant_id, label-specific key)` for AI-owned labels (Account, Interaction, ActionItem, ActionItemVersion, Owner, ActionItemTopic, ActionItemTopicVersion), plus property and vector indexes for ActionItem and ActionItemTopic
+- `DealNeo4jClient.setup_schema()` — UNIQUENESS constraints on `(tenant_id, label-specific key)` for Deal-owned labels (Deal, DealVersion), plus property and vector indexes for Deal
 
-Both pipelines share the same Neo4j client and database instance, with tenant-scoped isolation ensuring data separation.
+Both pipelines write to the same database instance, with tenant-scoped isolation ensuring data separation.
 
 ---
 
@@ -277,9 +276,9 @@ collision resistance even for deals created within the same millisecond. `deal_r
 is never used for identity, matching, or graph keys — it exists solely for
 human-readable display in logs and UIs.
 
-### Deal DB Nodes and Relationships
+### Deal Pipeline Nodes and Relationships
 
-The Deal DB contains four node labels. Our pipeline creates **one relationship type**:
+The Deal pipeline creates and manages four node labels in the shared database. Our pipeline creates **one relationship type**:
 
 ```
 (:Deal)-[:HAS_VERSION]->(:DealVersion)   # Created by repository.create_version_snapshot()
@@ -316,8 +315,7 @@ All database queries (both AI and Deal pipelines) are scoped by `tenant_id` and 
   tenant. Similarly, action items are isolated by account.
 - Vector search filters: `WHERE node.tenant_id = $tenant_id AND
   node.account_id = $account_id` are applied in all search methods.
-- **Both pipelines share the same `Neo4jClient` and database instance.** Schema is
-  managed centrally by `Neo4jClient.setup_schema()`.
+- **Both pipelines write to the same Neo4j database instance.** Each pipeline has its own client class (`Neo4jClient` for AI, `DealNeo4jClient` for Deals) with its own `setup_schema()` method for the labels it owns.
 
 ### Idempotency & Failure Modes
 

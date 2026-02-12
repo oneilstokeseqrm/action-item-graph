@@ -2,7 +2,7 @@
 
 > Comprehensive reference for how both pipelines (Action Item + Deal) were validated end-to-end against live infrastructure.
 
-**Last validated**: 2026-02-03 (live E2E) | 2026-02-08 (AI DB schema re-provisioned on new AuraDB Free instance)
+**Last validated**: 2026-02-11 (live E2E, single shared database)
 
 ---
 
@@ -40,7 +40,7 @@ Both pipelines write to a **single shared Neo4j AuraDB instance** using tenant-s
 |-----------|-----------------|
 | **Instance** | `NEO4J_URI` |
 | **Node Labels** | Account, Interaction, ActionItem, ActionItemVersion, Owner, ActionItemTopic, ActionItemTopicVersion, Deal, DealVersion |
-| **Constraints** | NODE KEY on (tenant_id, label-specific ID) for all entity labels |
+| **Constraints** | UNIQUENESS on (tenant_id, label-specific ID) for all entity labels |
 | **Vector Indexes** | 6 (ActionItem + ActionItemTopic + Deal, original + current for each) |
 | **Embedding Dimensions** | 1536 (text-embedding-3-small) |
 
@@ -82,7 +82,7 @@ If provisioning a fresh AuraDB instance (e.g., after free-tier reset), run the D
 
 | Type | Count | Details |
 |------|-------|---------|
-| NODE KEY constraints | Multiple | `(tenant_id, label_id)` on Account, Interaction, ActionItem, ActionItemVersion, Owner, ActionItemTopic, ActionItemTopicVersion, Deal, DealVersion |
+| UNIQUENESS constraints | Multiple | `(tenant_id, label_id)` on Account, Interaction, ActionItem, ActionItemVersion, Owner, ActionItemTopic, ActionItemTopicVersion, Deal, DealVersion |
 | Property indexes | Multiple | `tenant_id`, `account_id`, `status`, `canonical_name`, `stage` across labels |
 | Vector indexes | 6 | `ActionItem.embedding`, `ActionItem.embedding_current`, `ActionItemTopic.embedding`, `ActionItemTopic.embedding_current`, `Deal.embedding`, `Deal.embedding_current` (1536d, cosine) |
 
@@ -97,10 +97,10 @@ The **live E2E smoke test** (`scripts/run_live_e2e.py`) is the gold-standard val
 > **Both pipelines are tested simultaneously.** Each transcript is dispatched through
 > `EnvelopeDispatcher.dispatch()`, which calls `ActionItemPipeline.process_envelope()`
 > and `DealPipeline.process_envelope()` **concurrently via `asyncio.gather()`** on the
-> same envelope. Both pipelines execute at the same time, hitting their respective
-> live Neo4j databases in parallel, sharing a single OpenAI client. This is not two
-> separate test runs — it is one integrated test that validates the full concurrent
-> system as it would operate in production.
+> same envelope. Both pipelines execute at the same time, writing to the shared
+> Neo4j database concurrently, sharing both a single OpenAI client and the Neo4j
+> connection. This is not two separate test runs — it is one integrated test that
+> validates the full concurrent system as it would operate in production.
 
 ### How to Run
 
@@ -110,8 +110,8 @@ python scripts/run_live_e2e.py
 ```
 
 **Prerequisites:**
-- All environment variables set (OpenAI + both Neo4j instances)
-- Both database schemas provisioned
+- All environment variables set (OpenAI + Neo4j)
+- Database schema provisioned
 - Python environment with all dependencies installed (`uv sync` or `pip install -e ".[dev]"`)
 
 **Expected runtime:** ~5-6 minutes (dominated by OpenAI API latency)
@@ -160,8 +160,8 @@ TOTAL                          45         17       3        1                  3
 ```
 
 **Column definitions:**
-- **AI Items** / **Topics**: Action Item pipeline results (written to AI DB)
-- **Deals** / **Merged**: Deal pipeline results (written to Deal DB)
+- **AI Items** / **Topics**: Action Item pipeline results (written to shared DB)
+- **Deals** / **Merged**: Deal pipeline results (written to shared DB)
 - **Both OK**: `result.both_succeeded` — `True` only when **both** pipelines returned a successful result for that transcript (no exceptions). This is the critical simultaneous-execution indicator.
 - **Time**: Wall-clock time for `EnvelopeDispatcher.dispatch()` — includes both pipelines running concurrently
 
@@ -180,7 +180,7 @@ TOTAL                          45         17       3        1                  3
 | Deals created with MEDDIC | Final state query: 3 deals, all 100% MEDDIC completeness |
 | Deal merging works | Call 2 merges into Call 1's AML deal (version 1 → 2) |
 | DealVersion snapshots | 1 version snapshot created with `changed_fields` audit |
-| Interaction enrichment | `deal_count` stamped on each Deal DB Interaction node |
+| Interaction enrichment | `deal_count` stamped on each Interaction node |
 | UUIDv7 identity contract | `opportunity_id` values parseable as UUIDv7 |
 | `deal_ref` display alias | Derived from random tail, all 3 distinct |
 | Tenant-scoped isolation | All queries filter by `tenant_id` |
@@ -389,7 +389,7 @@ The following contracts have been validated through the combination of live E2E 
 |----------|----------|
 | UUIDv7 for `opportunity_id` | `test_uuid7.py` + live E2E: parseable, `.version == 7` |
 | `deal_ref` = `"deal_" + hex[-16:]` | Live E2E: 3 deals, all refs distinct, derived from random tail |
-| NODE KEY on `(tenant_id, id)` (AI DB) | 7 constraints verified via `SHOW CONSTRAINTS` |
+| UNIQUENESS on `(tenant_id, label_id)` | All constraints verified via `SHOW CONSTRAINTS` |
 | No CRM/Salesforce references | Grep across all prompts = 0 hits |
 | All timestamps UTC-aware | Grep for `datetime.now()` in `src/deal_graph/` = 0 hits |
 
@@ -401,7 +401,7 @@ The following contracts have been validated through the combination of live E2E 
 | Pipeline fault isolation | "Partial System Failure" scenario: AI succeeds when Deal fails |
 | Accumulative error handling | `test_deal_pipeline.py`: per-deal errors collected, not raised |
 | Idempotent schema setup | `IF NOT EXISTS` on all DDL; re-run produces no errors |
-| Idempotent ActionItem persistence | `MERGE` on `{id, tenant_id}` — second write is no-op |
+| Idempotent ActionItem persistence | `MERGE` on `{tenant_id, action_item_id}` — second write is no-op |
 | Duplicate-text fix (zip alignment) | `test_duplicate_text.py`: 3 tests validating 1:1 positional alignment |
 
 ### Deal Pipeline Specifics
@@ -456,7 +456,7 @@ The following contracts have been validated through the combination of live E2E 
 | Enterprise Discount Program (EDP) | $7.15M | proposal | 100% | 1 |
 
 **Key changes validated in this run:**
-- AI DB constraints upgraded to tenant-scoped NODE KEY (from global UNIQUENESS)
+- Constraints upgraded to tenant-scoped UNIQUENESS
 - Duplicate-text zip alignment fix
 - `create_action_item` MERGE key includes `tenant_id`
 
@@ -475,9 +475,9 @@ The following contracts have been validated through the combination of live E2E 
 
 This earlier run predates the Deal pipeline and Dispatcher. It validated the core Action Item pipeline in isolation.
 
-### AI DB Schema Re-provisioning — 2026-02-08
+### Schema Re-provisioning — 2026-02-08
 
-The AI Database was re-provisioned on a new AuraDB Free instance (`neo4j+s://1aa04126.databases.neo4j.io`). All 20 DDL statements (7 constraints, 9 indexes, 4 vector indexes) were executed via MCP and verified ONLINE. No pipeline code was modified.
+The shared database was re-provisioned on a new AuraDB Free instance (`neo4j+s://1aa04126.databases.neo4j.io`). All DDL statements (constraints, indexes, vector indexes) were executed via MCP and verified ONLINE. No pipeline code was modified.
 
 ---
 

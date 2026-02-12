@@ -48,21 +48,15 @@ Create a `.env` file with:
 # Required — OpenAI
 OPENAI_API_KEY=sk-...
 
-# Required — AI Database (Action Items, Topics, Owners)
+# Required — Neo4j (shared database for all pipelines)
 NEO4J_URI=neo4j+s://xxxxx.databases.neo4j.io
 NEO4J_PASSWORD=your-password
+DEAL_NEO4J_URI=neo4j+s://xxxxx.databases.neo4j.io   # same instance
+DEAL_NEO4J_PASSWORD=your-password                     # same credentials
 
-# Required — Deal Database (Deals, DealVersions) — SEPARATE Neo4j instance
-DEAL_NEO4J_URI=neo4j+s://yyyyy.databases.neo4j.io
-DEAL_NEO4J_PASSWORD=your-deal-password
-
-# Optional — AI DB
+# Optional — Neo4j
 # NEO4J_USERNAME=neo4j                   # defaults to 'neo4j'
 # NEO4J_DATABASE=neo4j                   # defaults to 'neo4j'
-
-# Optional — Deal DB
-# DEAL_NEO4J_USERNAME=neo4j              # defaults to 'neo4j'
-# DEAL_NEO4J_DATABASE=neo4j              # defaults to 'neo4j'
 # DEAL_SIMILARITY_THRESHOLD=0.70         # Vector match threshold
 # DEAL_AUTO_MATCH_THRESHOLD=0.90         # Auto-match (skip LLM) threshold
 
@@ -73,9 +67,9 @@ DEAL_NEO4J_PASSWORD=your-deal-password
 # LOG_FORMAT=json                        # json or console
 ```
 
-> **Important**: `NEO4J_*` and `DEAL_NEO4J_*` point to **two separate Neo4j Aura
-> instances**. The AI pipeline and Deal pipeline never share a database, driver, or
-> schema. See [Dual Database Architecture](#dual-database-architecture) below.
+> **Note**: `NEO4J_*` and `DEAL_NEO4J_*` both point to the **same shared Neo4j Aura
+> instance**. Both pipelines write to a single database, converging on shared Account
+> and Interaction nodes via defensive MERGE. See [Shared Database Architecture](#shared-database-architecture) below.
 
 ## Quick Start
 
@@ -196,32 +190,33 @@ The dispatcher uses `asyncio.gather(return_exceptions=True)` — one pipeline fa
 never blocks the other. See [docs/DEAL_SERVICE_ARCHITECTURE.md](./docs/DEAL_SERVICE_ARCHITECTURE.md)
 for full architecture details.
 
-## Dual Database Architecture
+## Shared Database Architecture
 
-This system uses **two separate Neo4j Aura instances** with strict isolation:
+All pipelines write to a **single shared Neo4j Aura instance**. Each pipeline owns
+specific labels and their constraints, converging on shared Account and Interaction
+nodes via defensive MERGE:
 
 ```
-┌─────────────────────┐    ┌─────────────────────┐
-│   AI Database        │    │   Deal Database      │
-│   (NEO4J_*)          │    │   (DEAL_NEO4J_*)     │
-├─────────────────────┤    ├─────────────────────┤
-│ Account              │    │ Deal                 │
-│ Interaction          │    │ DealVersion          │
-│ ActionItem           │    │ Interaction          │
-│ ActionItemVersion    │    │ Account              │
-│ Owner                │    │                      │
-│ Topic                │    │                      │
-│ TopicVersion         │    │                      │
-├─────────────────────┤    ├─────────────────────┤
-│ Client: Neo4jClient  │    │ Client: DealNeo4jClient │
-│ Constraints: NODE KEY│    │ Constraints: UNIQUE  │
-│ Vector: 4 indexes    │    │ Vector: 2 indexes    │
-└─────────────────────┘    └─────────────────────┘
+┌──────────────────────────────────────────────────┐
+│              Shared Neo4j Aura Instance           │
+├──────────────────────────────────────────────────┤
+│  Skeleton (eq-structured-graph-core):            │
+│    Account, Interaction, Contact, Entity, ...    │
+│                                                  │
+│  AI Pipeline (Neo4jClient):                      │
+│    ActionItem, ActionItemVersion, Owner,          │
+│    ActionItemTopic, ActionItemTopicVersion        │
+│    Constraints: UNIQUENESS · Vector: 4 indexes   │
+│                                                  │
+│  Deal Pipeline (DealNeo4jClient):                │
+│    Deal, DealVersion                             │
+│    Constraints: UNIQUENESS · Vector: 2 indexes   │
+└──────────────────────────────────────────────────┘
 ```
 
-- **`Neo4jClient`** manages the AI DB schema (tenant-scoped NODE KEY constraints on 7 labels)
-- **`DealNeo4jClient`** manages the Deal DB schema (uniqueness constraints, vector indexes)
-- They share no data, connections, or driver instances
+- **`Neo4jClient`** manages AI pipeline labels (UNIQUENESS constraints, 4 vector indexes)
+- **`DealNeo4jClient`** manages Deal pipeline labels (UNIQUENESS constraints, 2 vector indexes)
+- Both converge on shared Account/Interaction nodes via `MERGE ... ON CREATE SET ... ON MATCH SET`
 - Both pipelines run concurrently via `EnvelopeDispatcher` with fault isolation
 
 ## Architecture
@@ -259,8 +254,8 @@ This system uses **two separate Neo4j Aura instances** with strict isolation:
                                    ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                       Neo4j Graph Store                              │
-│  Nodes: Account, Interaction, ActionItem, Topic, Owner, Versions     │
-│  Vector indexes: ActionItem + Topic (embedding + embedding_current)  │
+│  Nodes: Account, Interaction, ActionItem, ActionItemTopic, Owner, +  │
+│  Vector indexes: ActionItem + ActionItemTopic (embedding + current)  │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -349,12 +344,12 @@ See [examples/transcripts/README.md](./examples/transcripts/README.md) for trans
 ### Live E2E Smoke Test (Dual-Pipeline)
 
 ```bash
-# Requires BOTH NEO4J_* AND DEAL_NEO4J_* credentials in .env
+# Requires NEO4J_* credentials in .env (shared database)
 python scripts/run_live_e2e.py
 ```
 
 Runs all 4 transcripts through the full `EnvelopeDispatcher`, exercising both the
-Action Item and Deal pipelines concurrently against live Neo4j Aura instances. See
+Action Item and Deal pipelines concurrently against the shared Neo4j Aura instance. See
 [docs/SMOKE_TEST_GUIDE.md](./docs/SMOKE_TEST_GUIDE.md) for comprehensive testing
 procedures, and [docs/LIVE_E2E_TEST_RESULTS.md](./docs/LIVE_E2E_TEST_RESULTS.md)
 for the latest validated run results.
@@ -454,7 +449,7 @@ action-item-graph/
 │   ├── models/
 │   │   ├── envelope.py       # EnvelopeV1 input format
 │   │   ├── action_item.py    # ActionItem, ActionItemVersion
-│   │   ├── topic.py          # Topic, TopicVersion, ExtractedTopic
+│   │   ├── topic.py          # ActionItemTopic, ActionItemTopicVersion, ExtractedTopic
 │   │   └── entities.py       # Account, Owner, Contact, etc.
 │   ├── prompts/
 │   │   ├── extract_action_items.py  # Extraction prompts
@@ -481,7 +476,7 @@ action-item-graph/
 │   ├── process_transcript.py # Basic usage example
 │   ├── run_transcript_tests.py # Transcript test runner
 │   └── transcripts/          # Real transcript testing
-├── src/deal_graph/              # Deal extraction pipeline (→ Deal DB)
+├── src/deal_graph/              # Deal extraction pipeline (→ shared DB)
 │   ├── utils.py                 # uuid7() wrapper (UUIDv7 via fastuuid)
 │   ├── config.py                # DEAL_NEO4J_* env vars, thresholds
 │   ├── repository.py            # DealRepository (graph CRUD)

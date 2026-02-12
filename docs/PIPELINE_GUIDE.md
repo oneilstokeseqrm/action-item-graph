@@ -481,8 +481,8 @@ Relationships carry metadata:
 
 ```cypher
 -- Uniqueness constraints (primary keys)
-CREATE CONSTRAINT action_item_id_unique FOR (n:ActionItem) REQUIRE (n.tenant_id, n.action_item_id) IS NODE KEY
-CREATE CONSTRAINT action_item_topic_id_unique FOR (n:ActionItemTopic) REQUIRE (n.tenant_id, n.action_item_topic_id) IS NODE KEY
+CREATE CONSTRAINT action_item_id_unique FOR (n:ActionItem) REQUIRE (n.tenant_id, n.action_item_id) IS UNIQUE
+CREATE CONSTRAINT action_item_topic_id_unique FOR (n:ActionItemTopic) REQUIRE (n.tenant_id, n.action_item_topic_id) IS UNIQUE
 
 -- Query performance indexes
 CREATE INDEX action_item_tenant_idx FOR (n:ActionItem) ON (n.tenant_id)

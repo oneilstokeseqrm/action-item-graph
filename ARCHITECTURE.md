@@ -2,9 +2,115 @@
 
 ## Overview
 
-A dual-pipeline system for extracting action items and deals from call transcripts. Both pipelines run concurrently against **a single shared Neo4j AuraDB instance**, sharing both the database and an OpenAI client.
+A system for extracting structured intelligence (action items and deals) from call transcripts, persisting to a shared Neo4j knowledge graph. Two enrichment pipelines — ActionItemPipeline and DealPipeline — run concurrently via `EnvelopeDispatcher`, sharing a single Neo4j AuraDB instance and OpenAI client. A third upstream pipeline (eq-structured-graph-core) also writes to the same database; all three are peers that converge on shared nodes.
+
+---
+
+## Core Principles
+
+These principles govern all architectural decisions. They should be preserved when extending the system.
+
+### 1. Protect the Structured Graph
+
+The shared Neo4j database is the source of truth. When integrating a new pipeline, the pipeline adapts to fit the existing schema — not the other way around. Established conventions (property names, constraint types, label naming) take precedence over pipeline-local preferences.
+
+### 2. Three Pipelines as Peers
+
+Three independent pipelines write to the same database:
+
+| Pipeline | Repo | What it creates |
+|----------|------|-----------------|
+| **Structured Graph** (eq-structured-graph-core) | Separate repo | Skeleton nodes (Account, Interaction, Contact, Deal, CalendarWeek) + flesh (Entity, Topic, Chunk, Community) |
+| **Action Item Pipeline** (this repo) | `src/action_item_graph/` | ActionItem, ActionItemVersion, Owner, ActionItemTopic, ActionItemTopicVersion |
+| **Deal Pipeline** (this repo) | `src/deal_graph/` | Deal, DealVersion |
+
+No pipeline is upstream of another. All three receive the same payload from an upstream ingestion service. Any pipeline may execute first. This means every pipeline must handle the case where shared nodes (Account, Interaction) don't yet exist.
+
+### 3. Schema Ownership
+
+Each pipeline owns the labels it creates and is responsible for their constraints, indexes, and schema evolution:
+
+| Owner | Labels | Constraint Authority |
+|-------|--------|---------------------|
+| **eq-structured-graph-core** (skeleton) | Account, Interaction, Contact, Deal, CalendarWeek, Entity, Topic, Chunk, Community | Upstream — we never create or drop constraints on these |
+| **AI pipeline** | ActionItem, ActionItemVersion, Owner, ActionItemTopic, ActionItemTopicVersion | `Neo4jClient.setup_schema()` |
+| **Deal pipeline** | Deal, DealVersion | `DealNeo4jClient.setup_schema()` |
+
+Shared labels (Account, Interaction) are skeleton-owned. Enrichment pipelines write to these nodes via defensive MERGE but never create or modify constraints on them.
+
+### 4. Defensive MERGE for Shared Nodes
+
+When multiple pipelines write to the same node type (Account, Interaction), each uses `MERGE ... ON CREATE SET ... ON MATCH SET`:
+
+- **ON CREATE SET**: Populates base properties if this pipeline creates the node first
+- **ON MATCH SET**: Only sets enrichment properties (e.g., `action_item_count`, `deal_count`, `processed_at`) — never overwrites skeleton-owned properties
+
+This makes execution order irrelevant. Whether the structured graph pipeline, the AI pipeline, or the deal pipeline reaches the node first, the end state converges.
+
+### 5. Pipeline Fault Isolation
+
+`EnvelopeDispatcher` uses `asyncio.gather(return_exceptions=True)`. One pipeline crashing never blocks or cancels the other. The `DispatcherResult` captures either a successful result or the exception from each pipeline independently. `overall_success` is `True` when at least one pipeline returned a result.
+
+### 6. Dual Embedding Strategy
+
+Both pipelines maintain two embedding vectors per entity to prevent "embedding drift":
+
+- **`embedding`** (immutable): Captures original semantic meaning. Used to catch similar NEW items.
+- **`embedding_current`** (mutable): Updated when the entity evolves. Used to catch STATUS UPDATES to existing items.
+
+Both indexes are searched during matching; results are deduplicated by primary key, keeping the higher score.
+
+### 7. Label-Specific Primary Keys
+
+Every node type uses a label-specific primary key property (not a generic `id`):
+
+| Label | Key Property |
+|-------|-------------|
+| Account | `account_id` |
+| Interaction | `interaction_id` |
+| ActionItem | `action_item_id` |
+| Owner | `owner_id` |
+| ActionItemTopic | `action_item_topic_id` |
+| Deal | `opportunity_id` |
+
+This prevents ambiguity in a shared database where multiple labels coexist. All MERGE operations use `{tenant_id: $tenant_id, <label_key>: $value}`.
+
+### 8. UNIQUENESS Constraints (Not NODE KEY)
+
+All enrichment pipelines use `IS UNIQUE` constraints, matching the structured database convention. NODE KEY (which adds existence enforcement) is stronger but requires coordination with eq-structured-graph-core to align system-wide.
+
+---
 
 ## System Architecture
+
+```
+                    Upstream Ingestion Service
+                              |
+                    (same payload to all)
+                              |
+               ┌──────────────┼──────────────┐
+               |              |              |
+               v              v              v
+     ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+     │  Structured  │ │ Action Item  │ │    Deal      │
+     │  Graph       │ │  Pipeline    │ │  Pipeline    │
+     │  (separate   │ │              │ │              │
+     │   repo)      │ │ Extract →    │ │ Extract →    │
+     │              │ │ Match →      │ │ Match →      │
+     │ Skeleton +   │ │ Merge →      │ │ Merge →      │
+     │ Flesh        │ │ Topics       │ │ Enrich       │
+     └──────┬───────┘ └──────┬───────┘ └──────┬───────┘
+            |                |                |
+            └────────────────┼────────────────┘
+                             v
+                    ┌────────────────┐
+                    │  Single Neo4j  │
+                    │  AuraDB        │
+                    │  (NEO4J_URI)   │
+                    └────────────────┘
+```
+
+Within this repo, `EnvelopeDispatcher` runs the Action Item and Deal pipelines concurrently:
 
 ```
                          EnvelopeV1
@@ -22,20 +128,14 @@ A dual-pipeline system for extracting action items and deals from call transcrip
                v                           v
     ┌─────────────────────┐     ┌─────────────────────┐
     │ ActionItemPipeline  │     │    DealPipeline      │
-    │                     │     │                      │
-    │ Extract → Match →   │     │ Extract → Match →    │
-    │ Merge  → Topics     │     │ Merge  → Enrich      │
     └──────────┬──────────┘     └──────────┬──────────┘
                |                           |
                └─────────────┬─────────────┘
                              v
                   ┌─────────────────────┐
                   │   Shared Neo4j DB   │
-                  │   (NEO4J_URI)       │
                   └─────────────────────┘
 ```
-
-Both pipelines receive the same `EnvelopeV1` and run concurrently. One pipeline failing never blocks or cancels the other. The `DispatcherResult` captures either a successful result or the exception from each pipeline independently.
 
 **Entry point**: `EnvelopeDispatcher.dispatch(envelope)` in `src/dispatcher/dispatcher.py`
 
@@ -81,8 +181,8 @@ All nodes include `tenant_id` for multi-tenancy isolation. Constraints enforce u
   - account_id: string
   - interaction_type: enum (transcript, note, document, email, meeting)
   - title: string (optional)
-  - transcript_text: string
-  - occurred_at: datetime
+  - content_text: string
+  - timestamp: datetime
   - duration_seconds: int (optional)
   - source: string (web-mic, upload, api, import)
   - user_id: string
@@ -213,11 +313,11 @@ All nodes include `tenant_id` for multi-tenancy isolation. Constraints enforce u
 
 ---
 
-## Deal Database Graph Schema
+## Deal Pipeline Graph Schema
 
 See [docs/DEAL_SERVICE_ARCHITECTURE.md](./docs/DEAL_SERVICE_ARCHITECTURE.md) for the complete Deal pipeline architecture, data models, and design decisions.
 
-### Node Types (Deal DB)
+### Node Types (Deal Pipeline)
 
 ```
 (:Deal)
@@ -256,7 +356,7 @@ See [docs/DEAL_SERVICE_ARCHITECTURE.md](./docs/DEAL_SERVICE_ARCHITECTURE.md) for
   - valid_from: datetime
   - valid_until: datetime (optional)
 
-(:Interaction) — Deal DB copy
+(:Interaction) — shared node, enriched by Deal pipeline
   - interaction_id: UUID
   - tenant_id: UUID
   - account_id: string
@@ -264,12 +364,12 @@ See [docs/DEAL_SERVICE_ARCHITECTURE.md](./docs/DEAL_SERVICE_ARCHITECTURE.md) for
   - deal_count: int (enriched after processing)
   - processed_at: datetime
 
-(:Account) — Deal DB copy
+(:Account) — shared node
   - account_id: string
   - tenant_id: UUID
 ```
 
-### Relationships (Deal DB)
+### Relationships (Deal Pipeline)
 
 ```
 (:Deal)-[:HAS_VERSION]->(:DealVersion)
@@ -441,6 +541,7 @@ This enables:
 ## Related Documentation
 
 - [Deal Service Architecture](./docs/DEAL_SERVICE_ARCHITECTURE.md) — Deal pipeline stages, MEDDIC extraction, data models
+- [Graph Integration Proposal](./docs/GRAPH_INTEGRATION_PROPOSAL.md) — Feasibility analysis for single-database architecture, concurrency safety proofs
 - [Smoke Test Guide](./docs/SMOKE_TEST_GUIDE.md) — E2E validation procedures and historical results
 - [Live E2E Test Results](./docs/LIVE_E2E_TEST_RESULTS.md) — Most recent live run validation record
 - [Pipeline Guide](./docs/PIPELINE_GUIDE.md) — Comprehensive pipeline usage guide
