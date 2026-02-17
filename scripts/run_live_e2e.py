@@ -75,7 +75,10 @@ def build_envelope(transcript: dict, tenant_id: UUID, account_id: str) -> Envelo
         source=SourceType.API,
         interaction_id=uuid4(),
         account_id=account_id,
-        extras={'meeting_title': transcript['meeting_title']},
+        extras={
+            'meeting_title': transcript['meeting_title'],
+            'user_name': "Peter O'Neil",
+        },
     )
 
 
@@ -308,6 +311,8 @@ async def query_ai_final_state(neo4j: Neo4jClient, tenant_id: str, account_id: s
     RETURN ai.action_item_id as action_item_id,
            ai.summary as summary,
            ai.owner as owner,
+           ai.owner_type as owner_type,
+           ai.is_user_owned as is_user_owned,
            ai.status as status,
            resolved_owner,
            topic_name,
@@ -321,8 +326,10 @@ async def query_ai_final_state(neo4j: Neo4jClient, tenant_id: str, account_id: s
 
     for idx, ai in enumerate(action_items, 1):
         sources = ', '.join(ai['source_interactions']) if ai['source_interactions'] else 'None'
+        owner_type = ai.get('owner_type', 'unknown')
+        user_tag = ' [USER]' if ai.get('is_user_owned') else ''
         print(f"  {idx}. {ai['summary']}")
-        print(f"     Owner: {ai['owner']} | Topic: {ai['topic_name'] or 'None'} | Source: {sources}")
+        print(f"     Owner: {ai['owner']} ({owner_type}){user_tag} | Topic: {ai['topic_name'] or 'None'} | Source: {sources}")
 
     print(f"  Total Action Items: {len(action_items)}")
 

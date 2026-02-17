@@ -313,6 +313,10 @@ class ActionItemMerger:
             new_implied_status=extraction.implied_status,
             new_due_date=extraction.due_date_text,
             merge_recommendation='merge',
+            existing_owner_type=existing_props.get('owner_type', 'named'),
+            existing_is_user_owned=existing_props.get('is_user_owned', False),
+            new_owner_type=extraction.owner_type,
+            new_is_user_owned=extraction.is_user_owned,
         )
 
         merged = await self.openai.chat_completion_structured(
@@ -333,6 +337,8 @@ class ActionItemMerger:
             'action_item_text': merged.action_item_text,
             'summary': merged.summary,
             'owner': merged.owner,
+            'owner_type': merged.owner_type,
+            'is_user_owned': merged.is_user_owned,
             'evolution_summary': merged.evolution_summary,
         }
 

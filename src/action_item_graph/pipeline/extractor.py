@@ -104,6 +104,7 @@ class ActionItemExtractor:
             transcript_text=envelope.content.text,
             meeting_title=envelope.meeting_title,
             participants=envelope.contact_ids if envelope.contact_ids else None,
+            user_name=envelope.extras.get('user_name') if envelope.extras else None,
         )
 
         # Convert to ActionItem models with embeddings
@@ -134,6 +135,7 @@ class ActionItemExtractor:
         user_id: str | None = None,
         meeting_title: str | None = None,
         participants: list[str] | None = None,
+        user_name: str | None = None,
     ) -> ExtractionOutput:
         """
         Extract action items from raw text (without envelope wrapper).
@@ -167,6 +169,7 @@ class ActionItemExtractor:
             transcript_text=text,
             meeting_title=meeting_title,
             participants=participants,
+            user_name=user_name,
         )
 
         # Convert to ActionItem models with embeddings
@@ -194,6 +197,7 @@ class ActionItemExtractor:
         transcript_text: str,
         meeting_title: str | None = None,
         participants: list[str] | None = None,
+        user_name: str | None = None,
     ) -> ExtractionResult:
         """
         Call OpenAI to extract action items from transcript.
@@ -202,6 +206,7 @@ class ActionItemExtractor:
             transcript_text: The transcript text
             meeting_title: Optional meeting title
             participants: Optional participant list
+            user_name: Optional recording user name (for is_user_owned tagging)
 
         Returns:
             ExtractionResult with raw extractions
@@ -210,6 +215,7 @@ class ActionItemExtractor:
             transcript_text=transcript_text,
             meeting_title=meeting_title,
             participants=participants,
+            user_name=user_name,
         )
 
         result = await self.openai_client.chat_completion_structured(
@@ -266,6 +272,8 @@ class ActionItemExtractor:
                 action_item_text=extraction.action_item_text,
                 summary=extraction.summary,
                 owner=extraction.owner,
+                owner_type=extraction.owner_type,
+                is_user_owned=extraction.is_user_owned,
                 conversation_context=extraction.conversation_context,
                 status=status,
                 source_interaction_id=interaction_id,

@@ -86,6 +86,19 @@ class ExtractedActionItem(BaseModel):
         description='For status updates only: what status does this imply? '
         'Must be one of: "completed", "in_progress", "cancelled", "deferred". Null for new items.',
     )
+    owner_type: Literal["named", "role_inferred", "unconfirmed"] = Field(
+        default="named",
+        description='How the owner was identified: "named" (real name from context), '
+        '"role_inferred" (role from context, e.g. "the account executive"), '
+        '"unconfirmed" (could not identify speaker). '
+        'NEVER use bare diarization labels (A, B, C, Speaker 1) as owner.',
+    )
+    is_user_owned: bool = Field(
+        default=False,
+        description='True if this action item belongs to the recording user '
+        '(the person who initiated the meeting/recording). '
+        'Only set to true if the user can be confidently identified.',
+    )
     confidence: float = Field(
         default=1.0,
         ge=0.0,
@@ -141,7 +154,9 @@ Extract TWO types of items:
 
 For each item, extract:
 - **action_item_text**: The verbatim or near-verbatim text from the transcript
-- **owner**: Who is responsible (use name as stated: "Sarah", "John", etc.)
+- **owner**: Who is responsible (see Speaker Attribution Rules above)
+- **owner_type**: How the owner was identified: "named", "role_inferred", or "unconfirmed"
+- **is_user_owned**: Whether this action item belongs to the recording user
 - **summary**: 1-sentence actionable description
 - **conversation_context**: 1-2 sentences of surrounding context
 - **topic**: The high-level project/theme this action item belongs to (see Topic Guidelines below)
@@ -172,6 +187,36 @@ Bad topic examples (do NOT use):
 
 For the topic context, explain in 1-2 sentences WHY this action item belongs to this topic.
 
+## Speaker Attribution Rules
+
+Transcripts often use diarization labels (A:, B:, C:, Speaker 1:, etc.) instead of
+real names. Follow this hierarchy for the `owner` field:
+
+1. **Named** — If you can identify the speaker by name from conversational context
+   (introductions, how others address them, self-identification), use their real name.
+   Example: Speaker A says "Hey Jackie" and Jackie responds → owner is "Jackie".
+
+2. **Role-inferred** — If you cannot determine a name but can infer the speaker's role
+   from context (who gives the demo, who asks about pricing, who manages the account),
+   use a descriptive role. Examples: "the account executive", "the client engineer",
+   "the project lead".
+
+3. **Unconfirmed** — If neither name nor role can be determined, set owner to
+   "unconfirmed". Do NOT use bare diarization labels (A, B, C, E, Speaker 1) as owner.
+
+Set `owner_type` to reflect which tier was used: "named", "role_inferred", or "unconfirmed".
+
+**Summary phrasing by owner type:**
+- Named: "Sarah will send the proposal by Friday"
+- Role-inferred: "The account executive will send the proposal by Friday"
+- Unconfirmed: "Send the proposal by Friday" (use imperative voice — no fake attribution)
+
+**User identification:**
+If the recording user's name is provided in the context below, identify which speaker
+corresponds to them using contextual clues (who opens the meeting, who introduces others,
+who says "I'll follow up"). Set `is_user_owned` to true for action items owned by the
+recording user. This does NOT filter items — extract everything, just tag the user's items.
+
 Guidelines:
 - Extract ALL action items, even if uncertain (just lower the confidence)
 - Do NOT extract vague intentions ("we should think about...")
@@ -192,6 +237,7 @@ def build_extraction_prompt(
     transcript_text: str,
     meeting_title: str | None = None,
     participants: list[str] | None = None,
+    user_name: str | None = None,
 ) -> list[dict[str, str]]:
     """
     Build the extraction prompt messages for OpenAI.
@@ -200,6 +246,7 @@ def build_extraction_prompt(
         transcript_text: The transcript text to extract from
         meeting_title: Optional meeting title for context
         participants: Optional list of participant names
+        user_name: Optional name of the recording user (for is_user_owned tagging)
 
     Returns:
         List of message dicts for OpenAI chat completion
@@ -210,6 +257,8 @@ def build_extraction_prompt(
         context_parts.append(f'Meeting title: {meeting_title}')
     if participants:
         context_parts.append(f"Participants: {', '.join(participants)}")
+    if user_name:
+        context_parts.append(f'Recording user: {user_name}')
 
     additional_context = '\n'.join(context_parts) if context_parts else ''
 

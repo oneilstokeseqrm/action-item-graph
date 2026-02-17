@@ -46,6 +46,14 @@ class MergedActionItem(BaseModel):
         description='The resolved owner. Usually stays the same unless explicitly reassigned. '
         'Use the most complete/canonical form of the name.',
     )
+    owner_type: str = Field(
+        default="named",
+        description='Owner identification type: "named", "role_inferred", or "unconfirmed"',
+    )
+    is_user_owned: bool = Field(
+        default=False,
+        description='Whether this action item belongs to the recording user',
+    )
     due_date_text: str | None = Field(
         default=None,
         description='Updated due date or timeframe if mentioned in the new extraction. '
@@ -92,7 +100,12 @@ Given an EXISTING ACTION ITEM and a NEW EXTRACTION that refers to the same task,
 
 **Owner resolution:**
 - Keep the existing owner unless the new extraction explicitly reassigns the task
-- Use the most complete name form (prefer "John Smith" over "John")"""
+- Use the most complete name form (prefer "John Smith" over "John")
+
+**Owner type resolution:**
+- Prefer "named" owners over "role_inferred" over "unconfirmed"
+- If the existing owner is "unconfirmed" and the new extraction has a name, upgrade to the name
+- Preserve `owner_type` and `is_user_owned` from whichever source has higher confidence"""
 
 
 MERGE_SYNTHESIS_USER_PROMPT_TEMPLATE = """Synthesize an update for this action item.
@@ -101,6 +114,8 @@ MERGE_SYNTHESIS_USER_PROMPT_TEMPLATE = """Synthesize an update for this action i
 Text: {existing_text}
 Summary: {existing_summary}
 Owner: {existing_owner}
+Owner Type: {existing_owner_type}
+Is User Owned: {existing_is_user_owned}
 Status: {existing_status}
 Due Date: {existing_due_date}
 Context: {existing_context}
@@ -111,6 +126,8 @@ Created: {existing_created}
 Text: {new_text}
 Summary: {new_summary}
 Owner: {new_owner}
+Owner Type: {new_owner_type}
+Is User Owned: {new_is_user_owned}
 Context: {new_context}
 Is Status Update: {new_is_status_update}
 Implied Status: {new_implied_status}
@@ -138,6 +155,10 @@ def build_merge_prompt(
     new_implied_status: str | None,
     new_due_date: str | None,
     merge_recommendation: str,
+    existing_owner_type: str = 'named',
+    existing_is_user_owned: bool = False,
+    new_owner_type: str = 'named',
+    new_is_user_owned: bool = False,
 ) -> list[dict[str, str]]:
     """
     Build the merge synthesis prompt messages for OpenAI.
@@ -154,6 +175,8 @@ def build_merge_prompt(
         existing_text=existing_text,
         existing_summary=existing_summary,
         existing_owner=existing_owner,
+        existing_owner_type=existing_owner_type,
+        existing_is_user_owned=str(existing_is_user_owned),
         existing_status=existing_status,
         existing_due_date=existing_due_date or 'Not specified',
         existing_context=existing_context or 'No additional context',
@@ -161,6 +184,8 @@ def build_merge_prompt(
         new_text=new_text,
         new_summary=new_summary,
         new_owner=new_owner,
+        new_owner_type=new_owner_type,
+        new_is_user_owned=str(new_is_user_owned),
         new_context=new_context,
         new_is_status_update=str(new_is_status_update),
         new_implied_status=new_implied_status or 'None',

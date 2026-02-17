@@ -70,6 +70,14 @@ class ActionItem(BaseModel):
     owner: str = Field(
         ..., description='Person responsible for this action item (name or identifier)'
     )
+    owner_type: str = Field(
+        default='named',
+        description='How owner was identified: "named", "role_inferred", or "unconfirmed"',
+    )
+    is_user_owned: bool = Field(
+        default=False,
+        description='Whether this action item belongs to the recording user',
+    )
     conversation_context: str = Field(
         default='',
         description='Surrounding context from the conversation that clarifies the action item',
@@ -154,6 +162,8 @@ class ActionItem(BaseModel):
             'action_item_text': self.action_item_text,
             'summary': self.summary,
             'owner': self.owner,
+            'owner_type': self.owner_type,
+            'is_user_owned': self.is_user_owned,
             'conversation_context': self.conversation_context,
             'due_date': self.due_date.isoformat() if self.due_date else None,
             'status': self.status.value if isinstance(self.status, ActionItemStatus) else self.status,
