@@ -98,7 +98,10 @@ class Interaction(BaseModel):
     source: str | None = Field(
         default=None, description='Origin of content (web-mic, upload, api, import)'
     )
-    user_id: str | None = Field(default=None, description='User who created/uploaded this')
+    user_id: str | None = Field(default=None, description='User who created/uploaded this (Auth0 sub)')
+    pg_user_id: UUID | None = Field(
+        default=None, description='Postgres user UUID from identity bridge'
+    )
 
     # Processing state
     processed_at: datetime | None = Field(
@@ -133,6 +136,7 @@ class Interaction(BaseModel):
             'duration_seconds': self.duration_seconds,
             'source': self.source,
             'user_id': self.user_id,
+            'pg_user_id': str(self.pg_user_id) if self.pg_user_id else None,
             'processed_at': self.processed_at.isoformat() if self.processed_at else None,
             'action_item_count': self.action_item_count,
         }

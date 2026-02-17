@@ -105,6 +105,7 @@ class ActionItemRepository:
                 i.timestamp = $timestamp,
                 i.source = $source,
                 i.user_id = $user_id,
+                i.pg_user_id = $pg_user_id,
                 i.title = $title,
                 i.duration_seconds = $duration_seconds,
                 i.created_at = datetime()
@@ -136,6 +137,7 @@ class ActionItemRepository:
                 'timestamp': interaction.timestamp.isoformat(),
                 'source': interaction.source,
                 'user_id': interaction.user_id,
+                'pg_user_id': str(interaction.pg_user_id) if interaction.pg_user_id else None,
                 'title': interaction.title,
                 'duration_seconds': interaction.duration_seconds,
                 'action_item_count': interaction.action_item_count,

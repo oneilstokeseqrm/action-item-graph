@@ -63,6 +63,10 @@ class EnvelopeV1(BaseModel):
     user_id: str = Field(
         ..., description='User identifier (supports Auth0 IDs, type-prefixed IDs) (REQUIRED)'
     )
+    pg_user_id: UUID | None = Field(
+        default=None,
+        description='Postgres user UUID from identity bridge (optional, dual-write alongside user_id)',
+    )
 
     # Content
     interaction_type: InteractionType = Field(..., description='Type of interaction (REQUIRED)')

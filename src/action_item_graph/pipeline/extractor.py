@@ -96,6 +96,7 @@ class ActionItemExtractor:
             duration_seconds=envelope.duration_seconds,
             source=envelope.source.value,
             user_id=envelope.user_id,
+            pg_user_id=envelope.pg_user_id,
             extras=envelope.extras,
         )
 
@@ -114,6 +115,7 @@ class ActionItemExtractor:
             account_id=envelope.account_id,
             interaction_id=interaction.interaction_id,
             user_id=envelope.user_id,
+            pg_user_id=envelope.pg_user_id,
         )
 
         # Update interaction with count
@@ -232,6 +234,7 @@ class ActionItemExtractor:
         account_id: str | None,
         interaction_id: UUID,
         user_id: str | None,
+        pg_user_id: UUID | None = None,
     ) -> list[ActionItem]:
         """
         Convert raw extractions to ActionItem models with embeddings.
@@ -278,6 +281,7 @@ class ActionItemExtractor:
                 status=status,
                 source_interaction_id=interaction_id,
                 user_id=user_id,
+                pg_user_id=pg_user_id,
                 embedding=embedding,
                 embedding_current=embedding,  # Same as original initially
                 confidence=extraction.confidence,

@@ -111,7 +111,10 @@ class ActionItem(BaseModel):
         default=None, description='The interaction that first created this action item'
     )
     user_id: str | None = Field(
-        default=None, description='User who initiated the interaction'
+        default=None, description='User who initiated the interaction (Auth0 sub)'
+    )
+    pg_user_id: UUID | None = Field(
+        default=None, description='Postgres user UUID from identity bridge'
     )
 
     # Dual embeddings for matching
@@ -175,6 +178,7 @@ class ActionItem(BaseModel):
             if self.source_interaction_id
             else None,
             'user_id': self.user_id,
+            'pg_user_id': str(self.pg_user_id) if self.pg_user_id else None,
             'embedding': self.embedding,
             'embedding_current': self.embedding_current,
             'confidence': self.confidence,

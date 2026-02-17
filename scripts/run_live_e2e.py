@@ -66,6 +66,7 @@ def build_envelope(transcript: dict, tenant_id: UUID, account_id: str) -> Envelo
     return EnvelopeV1(
         tenant_id=tenant_id,
         user_id='auth0|live_test_user',
+        pg_user_id=UUID('061ae392-47d5-4f04-9ea8-afa241f23555'),
         interaction_type=InteractionType.TRANSCRIPT,
         content=ContentPayload(
             text=transcript['text'],
