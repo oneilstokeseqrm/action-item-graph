@@ -28,7 +28,7 @@
     },
     "interaction_type": {
       "type": "string",
-      "enum": ["transcript", "note", "document"],
+      "enum": ["transcript", "note", "document", "email"],
       "description": "Type of interaction (REQUIRED)"
     },
     "content": {
@@ -55,7 +55,7 @@
     },
     "source": {
       "type": "string",
-      "enum": ["web-mic", "upload", "api", "import"],
+      "enum": ["web-mic", "upload", "api", "import", "email-pipeline"],
       "description": "Origin of content (REQUIRED)"
     },
     "extras": {

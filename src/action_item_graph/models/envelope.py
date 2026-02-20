@@ -18,6 +18,7 @@ class InteractionType(str, Enum):
     TRANSCRIPT = 'transcript'
     NOTE = 'note'
     DOCUMENT = 'document'
+    EMAIL = 'email'
 
 
 class ContentFormat(str, Enum):
@@ -35,6 +36,7 @@ class SourceType(str, Enum):
     UPLOAD = 'upload'
     API = 'api'
     IMPORT = 'import'
+    EMAIL_PIPELINE = 'email-pipeline'
 
 
 class ContentPayload(BaseModel):
