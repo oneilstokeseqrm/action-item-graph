@@ -1015,3 +1015,73 @@ class TestChangedFieldsNormalization:
         call_args = merger.repository.create_version_snapshot.call_args
         changed = call_args.kwargs['changed_fields']
         assert changed == ['opportunity_summary']
+
+    @pytest.mark.asyncio
+    async def test_qualification_dim_fields_whitelisted(
+        self, merger, mock_openai, auto_match_result,
+    ):
+        """Qualification dim_* fields should pass the whitelist filter."""
+        merged = MergedDeal(
+            opportunity_summary='Updated.',
+            evolution_summary='History.',
+            change_narrative='Champion strength updated.',
+            changed_fields=[
+                'opportunity_summary',
+                'dim_champion_strength',
+                'dim_identified_pain',
+                'dim_economic_buyer_access',
+            ],
+            should_update_embedding=False,
+        )
+        mock_openai.chat_completion_structured.return_value = merged
+
+        await merger.merge_deal(
+            match_result=auto_match_result,
+            tenant_id=TENANT_ID,
+        )
+
+        call_args = merger.repository.create_version_snapshot.call_args
+        changed = call_args.kwargs['changed_fields']
+        assert 'dim_champion_strength' in changed
+        assert 'dim_identified_pain' in changed
+        assert 'dim_economic_buyer_access' in changed
+
+
+# =============================================================================
+# Transcript Extracted Dimensions Count
+# =============================================================================
+
+
+class TestTranscriptExtractedDimensions:
+    """Verify TRANSCRIPT_EXTRACTED_DIMENSIONS contains all 15 dims."""
+
+    def test_count_is_15(self):
+        from deal_graph.pipeline.merger import TRANSCRIPT_EXTRACTED_DIMENSIONS
+        assert len(TRANSCRIPT_EXTRACTED_DIMENSIONS) == 15
+
+    def test_qualification_dims_present(self):
+        from deal_graph.pipeline.merger import TRANSCRIPT_EXTRACTED_DIMENSIONS
+        qual_dims = {
+            'champion_strength', 'economic_buyer_access', 'identified_pain',
+            'metrics_business_case', 'decision_criteria_alignment', 'decision_process_clarity',
+        }
+        assert qual_dims.issubset(TRANSCRIPT_EXTRACTED_DIMENSIONS)
+
+    def test_original_9_dims_still_present(self):
+        from deal_graph.pipeline.merger import TRANSCRIPT_EXTRACTED_DIMENSIONS
+        original_dims = {
+            'competitive_position', 'incumbent_displacement_risk',
+            'pricing_alignment', 'procurement_legal_progress',
+            'responsiveness', 'close_date_credibility',
+            'technical_fit', 'integration_security_risk', 'change_readiness',
+        }
+        assert original_dims.issubset(TRANSCRIPT_EXTRACTED_DIMENSIONS)
+
+    def test_whitelist_includes_all_dim_properties(self):
+        from deal_graph.pipeline.merger import (
+            TRANSCRIPT_EXTRACTED_DIMENSIONS,
+            DEAL_PROPERTY_WHITELIST,
+        )
+        for dim_id in TRANSCRIPT_EXTRACTED_DIMENSIONS:
+            assert f'dim_{dim_id}' in DEAL_PROPERTY_WHITELIST
+            assert f'dim_{dim_id}_confidence' in DEAL_PROPERTY_WHITELIST

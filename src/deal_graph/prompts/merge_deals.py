@@ -71,10 +71,22 @@ Assess whether the deal stage should change:
 
 Set should_update_embedding=true ONLY when the opportunity_summary changed substantially (scope redefined, fundamentally different deal identity). Minor MEDDIC updates or stage changes do NOT warrant re-embedding.
 
+## Ontology Dimension Scores
+
+In addition to MEDDIC text fields, update ontology dimension scores (0-3 scale) via the `ontology_dimensions` list.
+Include a DimensionExtraction for each dimension where the new transcript provides evidence.
+Omit dimensions where the transcript adds no new information (existing scores are preserved).
+
+Dimension merge rules by accumulation type:
+- **Additive** (identified_pain, metrics_business_case, decision_criteria_alignment, decision_process_clarity, technical_fit): new evidence enriches existing — score may increase
+- **Point-in-time** (champion_strength, economic_buyer_access, competitive_position, incumbent_displacement_risk, pricing_alignment, responsiveness, close_date_credibility, integration_security_risk, change_readiness): latest evidence supersedes — score reflects current state
+- **Monotonic** (procurement_legal_progress): should only increase; if evidence suggests regression, flag in change_narrative
+
 ## Output Rules
 
 - For each MEDDIC field: output the updated value if the transcript provides new info, or null to keep existing
-- changed_fields: list EVERY property name that was modified (e.g., ["meddic_champion", "stage", "amount", "opportunity_summary"])
+- For ontology_dimensions: include only dimensions with updated scores from the new transcript
+- changed_fields: list EVERY property name that was modified (e.g., ["meddic_champion", "stage", "amount", "dim_competitive_position"])
 - evolution_summary: MUST include the existing narrative PLUS the new update
 - change_narrative: MUST explain business context, not just list field diffs"""
 
@@ -98,6 +110,7 @@ MEDDIC:
   Decision Process: {existing_decision_process}
   Identified Pain: {existing_identified_pain}
   Champion: {existing_champion}
+{existing_dimensions_section}
 </existing_deal>
 
 <new_extraction>
@@ -112,11 +125,12 @@ MEDDIC:
   Decision Process: {extracted_decision_process}
   Identified Pain: {extracted_identified_pain}
   Champion: {extracted_champion}
+{extracted_dimensions_section}
 Confidence: {extracted_confidence}
 Reasoning: {extracted_reasoning}
 </new_extraction>
 
-How should these be merged? Apply the MEDDIC merge rules (additive vs replaceable) and generate the evolution narrative."""
+How should these be merged? Apply the merge rules (additive vs replaceable) for both MEDDIC text fields and ontology dimension scores, and generate the evolution narrative."""
 
 
 # =============================================================================
@@ -143,6 +157,40 @@ def build_deal_merge_prompt(
         val = existing_deal.get(key)
         return str(val) if val else default
 
+    # Build existing ontology dimensions section
+    dim_ids = [
+        'champion_strength', 'economic_buyer_access', 'identified_pain',
+        'metrics_business_case', 'decision_criteria_alignment', 'decision_process_clarity',
+        'competitive_position', 'incumbent_displacement_risk',
+        'pricing_alignment', 'procurement_legal_progress',
+        'responsiveness', 'close_date_credibility',
+        'technical_fit', 'integration_security_risk', 'change_readiness',
+    ]
+    existing_dim_lines = []
+    for dim_id in dim_ids:
+        score = existing_deal.get(f'dim_{dim_id}')
+        if score is not None:
+            existing_dim_lines.append(f'  {dim_id}: {score}/3')
+    existing_dimensions_section = ''
+    if existing_dim_lines:
+        existing_dimensions_section = (
+            'Ontology Dimensions:\n' + '\n'.join(existing_dim_lines)
+        )
+
+    # Build extracted dimensions section
+    extracted_dim_lines = []
+    for dim in extracted_deal.ontology_dimensions:
+        if dim.score is not None:
+            evidence_hint = f' — "{dim.evidence[:80]}..."' if dim.evidence else ''
+            extracted_dim_lines.append(
+                f'  {dim.dimension_id}: {dim.score}/3 (conf: {dim.confidence:.2f}){evidence_hint}'
+            )
+    extracted_dimensions_section = ''
+    if extracted_dim_lines:
+        extracted_dimensions_section = (
+            'Ontology Dimensions:\n' + '\n'.join(extracted_dim_lines)
+        )
+
     user_prompt = MERGE_SYNTHESIS_USER_PROMPT_TEMPLATE.format(
         # Existing deal fields
         existing_name=_get('name', 'Unnamed Deal'),
@@ -156,6 +204,7 @@ def build_deal_merge_prompt(
         existing_decision_process=_get('meddic_decision_process'),
         existing_identified_pain=_get('meddic_identified_pain'),
         existing_champion=_get('meddic_champion'),
+        existing_dimensions_section=existing_dimensions_section,
         # Extracted deal fields
         extracted_name=extracted_deal.opportunity_name,
         extracted_stage=extracted_deal.stage_assessment,
@@ -167,6 +216,7 @@ def build_deal_merge_prompt(
         extracted_decision_process=extracted_deal.decision_process or 'Not identified',
         extracted_identified_pain=extracted_deal.identified_pain or 'Not identified',
         extracted_champion=extracted_deal.champion or 'Not identified',
+        extracted_dimensions_section=extracted_dimensions_section,
         extracted_confidence=f'{extracted_deal.confidence:.2f}',
         extracted_reasoning=extracted_deal.reasoning,
     )

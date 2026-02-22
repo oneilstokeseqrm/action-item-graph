@@ -18,8 +18,8 @@ import structlog
 from action_item_graph.clients.openai_client import OpenAIClient
 
 from ..clients.neo4j_client import DealNeo4jClient
-from ..models.deal import Deal, DealStage, MEDDICProfile
-from ..models.extraction import ExtractedDeal, MergedDeal
+from ..models.deal import Deal, DealStage, MEDDICProfile, OntologyScores
+from ..models.extraction import DimensionExtraction, ExtractedDeal, MergedDeal
 from ..prompts.merge_deals import build_deal_merge_prompt
 from ..repository import DealRepository
 from ..utils import uuid7
@@ -41,6 +41,33 @@ BARE_TO_PREFIXED = {
     'champion': 'meddic_champion',
 }
 
+# Ontology dimension IDs that are LLM-extracted from transcripts
+# (excludes computed dimensions like activity_velocity, time_in_stage, etc.)
+TRANSCRIPT_EXTRACTED_DIMENSIONS = frozenset({
+    # Qualification
+    'champion_strength',
+    'economic_buyer_access',
+    'identified_pain',
+    'metrics_business_case',
+    'decision_criteria_alignment',
+    'decision_process_clarity',
+    # Competitive
+    'competitive_position',
+    'incumbent_displacement_risk',
+    # Commercial
+    'pricing_alignment',
+    'procurement_legal_progress',
+    # Engagement
+    'responsiveness',
+    # Timeline
+    'close_date_credibility',
+    # Technical
+    'technical_fit',
+    'integration_security_risk',
+    # Organizational
+    'change_readiness',
+})
+
 # Whitelist: only actual persisted Deal node properties that can change during merge.
 # Derived from _build_updates_dict() keys in this file.
 DEAL_PROPERTY_WHITELIST = frozenset({
@@ -53,10 +80,33 @@ DEAL_PROPERTY_WHITELIST = frozenset({
     'meddic_identified_pain',
     'meddic_champion',
     'meddic_completeness',
+    'ontology_completeness',
     'stage',
     'amount',
     'embedding_current',
+    # Ontology dim_* properties (generated from TRANSCRIPT_EXTRACTED_DIMENSIONS)
+    *(f'dim_{d}' for d in TRANSCRIPT_EXTRACTED_DIMENSIONS),
+    *(f'dim_{d}_confidence' for d in TRANSCRIPT_EXTRACTED_DIMENSIONS),
 })
+
+
+# =============================================================================
+# Helpers
+# =============================================================================
+
+
+def _build_ontology_scores(
+    dimensions: list[DimensionExtraction],
+) -> OntologyScores:
+    """Build OntologyScores from a list of DimensionExtraction results."""
+    scores: dict[str, int | None] = {}
+    confidences: dict[str, float] = {}
+    evidence: dict[str, str | None] = {}
+    for dim in dimensions:
+        scores[dim.dimension_id] = dim.score
+        confidences[dim.dimension_id] = dim.confidence
+        evidence[dim.dimension_id] = dim.evidence
+    return OntologyScores(scores=scores, confidences=confidences, evidence=evidence)
 
 
 # =============================================================================
@@ -197,6 +247,9 @@ class DealMerger:
             champion_confidence=extracted_deal.confidence if extracted_deal.champion else 0.0,
         )
 
+        # Build ontology scores from extraction dimensions
+        ontology = _build_ontology_scores(extracted_deal.ontology_dimensions)
+
         deal = Deal(
             tenant_id=tenant_id,
             opportunity_id=opportunity_id,
@@ -207,6 +260,7 @@ class DealMerger:
             account_id=account_id,
             currency=extracted_deal.currency,
             meddic=meddic,
+            ontology_scores=ontology,
             opportunity_summary=extracted_deal.opportunity_summary,
             evolution_summary=f'Initial extraction: {extracted_deal.opportunity_summary}',
             embedding=embedding,
@@ -407,5 +461,27 @@ class DealMerger:
         # Amount
         if merged.amount is not None:
             updates['amount'] = merged.amount
+
+        # Ontology dimension scores — update dim_* properties from merged dimensions
+        for dim in merged.ontology_dimensions:
+            if dim.score is not None:
+                updates[f'dim_{dim.dimension_id}'] = dim.score
+                updates[f'dim_{dim.dimension_id}_confidence'] = dim.confidence
+
+        # Recompute ontology_completeness from merged state
+        all_dim_ids = list(TRANSCRIPT_EXTRACTED_DIMENSIONS)
+        scored_count = 0
+        total_count = len(all_dim_ids)
+        for dim_id in all_dim_ids:
+            # Check merged value first, then existing
+            merged_score = next(
+                (d.score for d in merged.ontology_dimensions if d.dimension_id == dim_id),
+                None,
+            )
+            existing_score = existing_props.get(f'dim_{dim_id}')
+            if merged_score is not None or existing_score is not None:
+                scored_count += 1
+        if total_count > 0:
+            updates['ontology_completeness'] = scored_count / total_count
 
         return updates

@@ -345,32 +345,23 @@ class DealRepository:
         Returns:
             Created DealVersion node properties
         """
+        # Copy all Deal properties to the DealVersion, then override version-specific
+        # fields. This pattern automatically captures new dim_* properties without
+        # requiring Cypher changes when ontology dimensions are added.
         query = """
             MATCH (d:Deal {tenant_id: $tenant_id, opportunity_id: $opportunity_id})
-            CREATE (v:DealVersion {
-                version_id: randomUUID(),
-                deal_opportunity_id: d.opportunity_id,
-                tenant_id: d.tenant_id,
-                version: d.version,
-                name: d.name,
-                stage: d.stage,
-                amount: d.amount,
-                opportunity_summary: d.opportunity_summary,
-                evolution_summary: d.evolution_summary,
-                meddic_metrics: d.meddic_metrics,
-                meddic_economic_buyer: d.meddic_economic_buyer,
-                meddic_decision_criteria: d.meddic_decision_criteria,
-                meddic_decision_process: d.meddic_decision_process,
-                meddic_identified_pain: d.meddic_identified_pain,
-                meddic_champion: d.meddic_champion,
-                meddic_completeness: d.meddic_completeness,
-                change_summary: $change_summary,
-                changed_fields: $changed_fields,
-                change_source_interaction_id: $change_source_interaction_id,
-                created_at: datetime(),
-                valid_from: coalesce(d.created_at, datetime()),
-                valid_until: datetime()
-            })
+            CREATE (v:DealVersion)
+            SET v += d {.*}
+            SET v.version_id = randomUUID(),
+                v.deal_opportunity_id = d.opportunity_id,
+                v.version = d.version,
+                v.change_summary = $change_summary,
+                v.changed_fields = $changed_fields,
+                v.change_source_interaction_id = $change_source_interaction_id,
+                v.created_at = datetime(),
+                v.valid_from = coalesce(d.created_at, datetime()),
+                v.valid_until = datetime()
+            WITH d, v
             MERGE (d)-[:HAS_VERSION]->(v)
             RETURN v {.*} as version
         """

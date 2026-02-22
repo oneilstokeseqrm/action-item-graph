@@ -11,6 +11,35 @@ structured output calls. Each model corresponds to a specific pipeline stage:
 from pydantic import BaseModel, Field
 
 
+class DimensionExtraction(BaseModel):
+    """
+    A single ontology dimension extracted from a transcript.
+
+    Score of None means the dimension was not discussed/evidenced.
+    Score of 0 means evidence of weakness was found.
+    """
+
+    dimension_id: str = Field(
+        ..., description='Ontology dimension ID (e.g. "competitive_position")'
+    )
+    score: int | None = Field(
+        default=None,
+        ge=0,
+        le=3,
+        description='0-3 score or None for insufficient evidence',
+    )
+    confidence: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description='Confidence in this score (0.0-1.0)',
+    )
+    evidence: str | None = Field(
+        default=None,
+        description='Supporting evidence text from the transcript',
+    )
+
+
 class ExtractedDeal(BaseModel):
     """
     A single deal extracted from a transcript via MEDDIC analysis.
@@ -62,6 +91,12 @@ class ExtractedDeal(BaseModel):
     currency: str = Field(default='USD', description='Currency code')
     expected_close_timeframe: str | None = Field(
         default=None, description='Freetext close timeframe (e.g., "Q2 2026")'
+    )
+
+    # Ontology dimension scores (beyond MEDDIC)
+    ontology_dimensions: list[DimensionExtraction] = Field(
+        default_factory=list,
+        description='Scored ontology dimensions extracted from the transcript',
     )
 
     # Quality signals
@@ -159,6 +194,12 @@ class MergedDeal(BaseModel):
     amount: float | None = Field(default=None, description='Updated deal value')
     expected_close_date_text: str | None = Field(
         default=None, description='Updated close timeframe (freetext)'
+    )
+
+    # Ontology dimension updates (beyond MEDDIC)
+    ontology_dimensions: list[DimensionExtraction] = Field(
+        default_factory=list,
+        description='Updated ontology dimension scores (None score = keep existing)',
     )
 
     # Embedding decision

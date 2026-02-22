@@ -276,6 +276,49 @@ class TestDiscoveryExtraction:
         assert 'Plain text' in system_content
         assert 'Markdown' in system_content
 
+    @pytest.mark.asyncio
+    async def test_system_prompt_contains_qualification_dimensions(
+        self, extractor, mock_openai,
+    ):
+        """System prompt should include all 6 qualification dimensions."""
+        mock_openai.chat_completion_structured.return_value = DealExtractionResult(
+            deals=[], has_deals=False,
+        )
+
+        await extractor._extract_discovery(content_text='test')
+
+        call_args = mock_openai.chat_completion_structured.call_args
+        system_content = call_args.kwargs['messages'][0]['content']
+        for dim_id in [
+            'champion_strength', 'economic_buyer_access', 'identified_pain',
+            'metrics_business_case', 'decision_criteria_alignment', 'decision_process_clarity',
+        ]:
+            assert dim_id in system_content, f'{dim_id} missing from system prompt'
+
+    @pytest.mark.asyncio
+    async def test_system_prompt_contains_all_15_dimensions(
+        self, extractor, mock_openai,
+    ):
+        """System prompt should include all 15 transcript-extracted dimensions."""
+        mock_openai.chat_completion_structured.return_value = DealExtractionResult(
+            deals=[], has_deals=False,
+        )
+
+        await extractor._extract_discovery(content_text='test')
+
+        call_args = mock_openai.chat_completion_structured.call_args
+        system_content = call_args.kwargs['messages'][0]['content']
+        all_dims = [
+            'champion_strength', 'economic_buyer_access', 'identified_pain',
+            'metrics_business_case', 'decision_criteria_alignment', 'decision_process_clarity',
+            'competitive_position', 'incumbent_displacement_risk',
+            'pricing_alignment', 'procurement_legal_progress',
+            'responsiveness', 'close_date_credibility',
+            'technical_fit', 'integration_security_risk', 'change_readiness',
+        ]
+        for dim_id in all_dims:
+            assert dim_id in system_content, f'{dim_id} missing from system prompt'
+
 
 # =============================================================================
 # Targeted Mode Tests (Case A)
@@ -382,6 +425,33 @@ class TestTargetedExtraction:
         assert 'POC' in user_content
         assert 'Data silos' in user_content
         assert 'James' in user_content
+
+    @pytest.mark.asyncio
+    async def test_targeted_prompt_includes_qualification_dim_scores(
+        self, extractor, mock_openai,
+    ):
+        """Targeted prompt should show existing qualification dimension scores."""
+        deal_with_qual_dims = {
+            'name': 'Test Deal',
+            'stage': 'qualification',
+            'dim_champion_strength': 2,
+            'dim_identified_pain': 3,
+            'dim_economic_buyer_access': 1,
+        }
+        mock_openai.chat_completion_structured.return_value = DealExtractionResult(
+            deals=[], has_deals=False,
+        )
+
+        await extractor._extract_targeted(
+            content_text='Transcript...',
+            existing_deal=deal_with_qual_dims,
+        )
+
+        call_args = mock_openai.chat_completion_structured.call_args
+        user_content = call_args.kwargs['messages'][1]['content']
+        assert 'champion_strength: 2/3' in user_content
+        assert 'identified_pain: 3/3' in user_content
+        assert 'economic_buyer_access: 1/3' in user_content
 
     @pytest.mark.asyncio
     async def test_targeted_handles_sparse_existing_deal(

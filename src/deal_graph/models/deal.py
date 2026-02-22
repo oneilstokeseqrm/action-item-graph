@@ -133,6 +133,49 @@ class MEDDICProfile(BaseModel):
         return props
 
 
+class OntologyScores(BaseModel):
+    """
+    Ontology dimension scores stored alongside MEDDIC on Deal nodes.
+
+    Stores the scored (0-3) output for each ontology dimension beyond
+    the core MEDDIC fields. MEDDIC dimensions are kept in MEDDICProfile
+    for backward compatibility; this captures the expanded set.
+
+    Scores are stored in dicts keyed by dimension_id. A score of None
+    means "insufficient evidence" (distinct from 0 = "evidence of weakness").
+    """
+
+    scores: dict[str, int | None] = Field(
+        default_factory=dict,
+        description='dimension_id → 0-3 score or None (insufficient evidence)',
+    )
+    confidences: dict[str, float] = Field(
+        default_factory=dict,
+        description='dimension_id → confidence in score (0.0-1.0)',
+    )
+    evidence: dict[str, str | None] = Field(
+        default_factory=dict,
+        description='dimension_id → evidence text from transcript',
+    )
+
+    @property
+    def completeness_score(self) -> float:
+        """Fraction of dimensions that have a non-null score."""
+        if not self.scores:
+            return 0.0
+        scored = sum(1 for v in self.scores.values() if v is not None)
+        return scored / len(self.scores)
+
+    def to_neo4j_properties(self) -> dict[str, Any]:
+        """Flatten to Neo4j properties with dim_ prefix."""
+        props: dict[str, Any] = {}
+        for dim_id, score in self.scores.items():
+            props[f'dim_{dim_id}'] = score
+            props[f'dim_{dim_id}_confidence'] = self.confidences.get(dim_id, 0.0)
+        props['ontology_completeness'] = self.completeness_score
+        return props
+
+
 class Deal(BaseModel):
     """
     Deal node in the knowledge graph.
@@ -164,6 +207,15 @@ class Deal(BaseModel):
     # MEDDIC qualification profile
     meddic: MEDDICProfile = Field(
         default_factory=MEDDICProfile, description='MEDDIC qualification data'
+    )
+
+    # Extended ontology dimension scores (beyond MEDDIC)
+    ontology_scores: OntologyScores = Field(
+        default_factory=OntologyScores,
+        description='Ontology dimension scores (0-3) keyed by dimension_id',
+    )
+    ontology_version: str | None = Field(
+        default=None, description='Hash of ontology config used for extraction'
     )
 
     # Summaries
@@ -261,6 +313,10 @@ class Deal(BaseModel):
         }
         # Flatten MEDDIC properties
         props.update(self.meddic.to_neo4j_properties())
+        # Flatten ontology dimension scores
+        props.update(self.ontology_scores.to_neo4j_properties())
+        if self.ontology_version:
+            props['ontology_version'] = self.ontology_version
         # Filter out None values for cleaner Neo4j storage
         return {k: v for k, v in props.items() if v is not None}
 
@@ -319,6 +375,17 @@ class DealVersion(BaseModel):
     meddic_champion: str | None = Field(default=None, description='Snapshot of champion')
     meddic_completeness: float | None = Field(
         default=None, description='Snapshot of completeness score'
+    )
+
+    # Ontology dimension score snapshots (JSON-serialized dicts)
+    ontology_scores_json: str | None = Field(
+        default=None, description='JSON snapshot of dimension_id → score dict'
+    )
+    ontology_completeness: float | None = Field(
+        default=None, description='Snapshot of ontology completeness score'
+    )
+    ontology_version: str | None = Field(
+        default=None, description='Ontology config version hash at snapshot time'
     )
 
     # Change tracking
