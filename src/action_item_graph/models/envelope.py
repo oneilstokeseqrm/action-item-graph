@@ -19,6 +19,7 @@ class InteractionType(str, Enum):
     NOTE = 'note'
     DOCUMENT = 'document'
     EMAIL = 'email'
+    MEETING = 'meeting'
 
 
 class ContentFormat(str, Enum):
@@ -27,6 +28,7 @@ class ContentFormat(str, Enum):
     PLAIN = 'plain'
     MARKDOWN = 'markdown'
     DIARIZED = 'diarized'
+    EMAIL = 'email'
 
 
 class SourceType(str, Enum):
@@ -37,6 +39,8 @@ class SourceType(str, Enum):
     API = 'api'
     IMPORT = 'import'
     EMAIL_PIPELINE = 'email-pipeline'
+    GMAIL = 'gmail'
+    OUTLOOK = 'outlook'
 
 
 class ContentPayload(BaseModel):
