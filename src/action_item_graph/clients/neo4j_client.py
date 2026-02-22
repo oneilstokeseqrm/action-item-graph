@@ -72,6 +72,12 @@ class Neo4jClient:
             # Verify connectivity
             await self._driver.verify_connectivity()
 
+    async def verify_connectivity(self) -> None:
+        """Verify the database is reachable."""
+        if self._driver is None:
+            await self.connect()
+        await self._driver.verify_connectivity()
+
     async def close(self) -> None:
         """Close the database connection."""
         if self._driver:
