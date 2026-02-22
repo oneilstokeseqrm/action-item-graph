@@ -65,6 +65,15 @@ DEAL_NEO4J_PASSWORD=your-password                     # same credentials
 # EMBEDDING_MODEL=text-embedding-3-small # defaults to text-embedding-3-small
 # LOG_LEVEL=INFO                         # DEBUG, INFO, WARNING, ERROR
 # LOG_FORMAT=json                        # json or console
+
+# Railway API Service (required when running as a service)
+# WORKER_API_KEY=your-shared-secret     # Bearer token for Lambda → Railway auth
+
+# Lambda Forwarder (set in Lambda environment)
+# API_BASE_URL=https://your-railway-service.up.railway.app
+# WORKER_API_KEY=your-shared-secret     # Must match Railway's WORKER_API_KEY
+# HTTP_TIMEOUT_SECONDS=100              # httpx timeout (default: 100)
+# MAX_RETRIES=2                         # Retries for 5xx/network errors (default: 2)
 ```
 
 > **Note**: `NEO4J_*` and `DEAL_NEO4J_*` both point to the **same shared Neo4j Aura
@@ -272,6 +281,8 @@ nodes via defensive MERGE:
 | `ActionItemPipeline` | Orchestrates the full extraction-match-merge-topic flow |
 | `DealPipeline` | Orchestrates deal extraction, vector matching, and LLM-synthesized merging |
 | `EnvelopeDispatcher` | Routes envelopes to both pipelines concurrently with fault isolation |
+| `Railway API` | FastAPI service receiving events from Lambda, dispatching to both pipelines |
+| `Lambda Forwarder` | Thin AWS Lambda parsing EventBridge/SQS messages, forwarding to Railway |
 
 See [docs/DEAL_SERVICE_ARCHITECTURE.md](./docs/DEAL_SERVICE_ARCHITECTURE.md) for the Deal pipeline architecture.
 
@@ -323,6 +334,9 @@ pytest tests/test_deal_extraction.py tests/test_deal_matcher.py tests/test_deal_
 # Dispatcher (routes to both pipelines)
 pytest tests/test_dispatcher.py -v
 
+# Event consumer (Railway API + Lambda)
+pytest tests/test_api_config.py tests/test_api_auth.py tests/test_api_health.py tests/test_api_process.py tests/test_api_main.py tests/test_lambda_config.py tests/test_lambda_envelope.py tests/test_lambda_api_client.py tests/test_lambda_handler.py -v
+
 # Duplicate-text regression tests
 pytest tests/test_duplicate_text.py -v
 ```
@@ -353,6 +367,43 @@ Action Item and Deal pipelines concurrently against the shared Neo4j Aura instan
 [docs/SMOKE_TEST_GUIDE.md](./docs/SMOKE_TEST_GUIDE.md) for comprehensive testing
 procedures, and [docs/LIVE_E2E_TEST_RESULTS.md](./docs/LIVE_E2E_TEST_RESULTS.md)
 for the latest validated run results.
+
+### Railway API Service
+
+The project includes a FastAPI service for receiving events from AWS infrastructure:
+
+```bash
+# Start the Railway API service locally
+uvicorn action_item_graph.api.main:app --host 0.0.0.0 --port 8000
+
+# Health check
+curl http://localhost:8000/health
+
+# Process an envelope (requires WORKER_API_KEY)
+curl -X POST http://localhost:8000/process \
+  -H "Authorization: Bearer $WORKER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"tenant_id": "...", "user_id": "...", ...}'
+```
+
+The service initializes Neo4j and OpenAI clients at startup and dispatches envelopes through `EnvelopeDispatcher` (both Action Item and Deal pipelines).
+
+### Lambda Packaging
+
+Build the Lambda deployment zip for the event forwarder:
+
+```bash
+# Package Lambda for arm64 deployment
+./scripts/package_lambda.sh
+# Output: dist/action-item-graph-ingest.zip (~19MB)
+
+# Deploy to AWS
+aws lambda update-function-code \
+  --function-name action-item-graph-ingest \
+  --zip-file fileb://dist/action-item-graph-ingest.zip
+```
+
+The Lambda parses EventBridge-wrapped SQS messages and forwards them to the Railway API service.
 
 ## API Reference
 
@@ -455,13 +506,25 @@ action-item-graph/
 │   │   ├── extract_action_items.py  # Extraction prompts
 │   │   ├── merge_action_items.py    # Merge synthesis prompts
 │   │   └── topic_prompts.py         # Topic resolution prompts
-│   └── pipeline/
-│       ├── extractor.py      # Action item extraction
-│       ├── matcher.py        # Similarity matching
-│       ├── merger.py         # Merge decision execution
-│       ├── topic_resolver.py # Topic matching logic
-│       ├── topic_executor.py # Topic creation/linking
-│       └── pipeline.py       # Main orchestrator
+│   ├── pipeline/
+│   │   ├── extractor.py      # Action item extraction
+│   │   ├── matcher.py        # Similarity matching
+│   │   ├── merger.py         # Merge decision execution
+│   │   ├── topic_resolver.py # Topic matching logic
+│   │   ├── topic_executor.py # Topic creation/linking
+│   │   └── pipeline.py       # Main orchestrator
+│   ├── api/                     # Railway FastAPI service
+│   │   ├── main.py              # App with lifespan (Neo4j + OpenAI init)
+│   │   ├── config.py            # Service configuration (pydantic-settings)
+│   │   ├── auth.py              # Bearer token authentication
+│   │   └── routes/
+│   │       ├── health.py        # GET /health
+│   │       └── process.py       # POST /process
+│   └── lambda_ingest/           # AWS Lambda forwarder
+│       ├── handler.py           # Powertools BatchProcessor entry point
+│       ├── config.py            # Lambda configuration (pydantic-settings)
+│       ├── envelope.py          # EventBridge wrapper parser
+│       └── api_client.py        # Railway API client with retry
 ├── tests/
 │   ├── test_pipeline.py           # AI pipeline end-to-end
 │   ├── test_deal_pipeline.py      # Deal pipeline end-to-end
@@ -487,7 +550,8 @@ action-item-graph/
 ├── src/dispatcher/              # Dual-pipeline envelope dispatcher
 │   └── dispatcher.py            # EnvelopeDispatcher, DispatcherResult
 ├── scripts/
-│   └── run_live_e2e.py          # Live E2E smoke test (dual-pipeline)
+│   ├── run_live_e2e.py          # Live E2E smoke test (dual-pipeline)
+│   └── package_lambda.sh        # Lambda deployment packaging
 ├── docs/
 │   ├── API.md                   # API reference
 │   ├── PIPELINE_GUIDE.md        # Comprehensive pipeline guide

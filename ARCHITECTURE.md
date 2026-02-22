@@ -84,29 +84,48 @@ All enrichment pipelines use `IS UNIQUE` constraints, matching the structured da
 ## System Architecture
 
 ```
-                    Upstream Ingestion Service
-                              |
-                    (same payload to all)
-                              |
-               ┌──────────────┼──────────────┐
-               |              |              |
-               v              v              v
-     ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-     │  Structured  │ │ Action Item  │ │    Deal      │
-     │  Graph       │ │  Pipeline    │ │  Pipeline    │
-     │  (separate   │ │              │ │              │
-     │   repo)      │ │ Extract →    │ │ Extract →    │
-     │              │ │ Match →      │ │ Match →      │
-     │ Skeleton +   │ │ Merge →      │ │ Merge →      │
-     │ Flesh        │ │ Topics       │ │ Enrich       │
-     └──────┬───────┘ └──────┬───────┘ └──────┬───────┘
-            |                |                |
-            └────────────────┼────────────────┘
-                             v
+                     Upstream Publishers
+          ┌──────────────────┬───────────────────┐
+          │                  │                   │
+  live-transcription  eq-email-pipeline   eq-structured-graph-core
+          │                  │                   │
+          └────────┬─────────┘                   │
+                   │                              │
+                   ▼                              │
+          ┌────────────────┐                     │
+          │  EventBridge   │                     │
+          │  (default bus) │                     │
+          └───────┬────────┘                     │
+                  │                              │
+    ┌─────────────┴─────────────┐               │
+    │                           │               │
+    ▼                           ▼               │
+┌──────────────┐     ┌──────────────────┐       │
+│ thematic-lm  │     │ action-item-graph│       │
+│ SQS + Lambda │     │ SQS + Lambda     │       │
+│ (existing)   │     │ (new)            │       │
+└──────────────┘     └────────┬─────────┘       │
+                              │                 │
+                    HTTPS POST /process          │
+                              │                 │
+                              ▼                 │
+                    ┌──────────────────┐        │
+                    │ Railway FastAPI  │        │
+                    │ EnvelopeDispatcher│       │
+                    └────────┬─────────┘       │
+                             │                 │
+               ┌─────────────┴──────────────┐  │
+               │                            │  │
+               ▼                            ▼  ▼
+    ┌─────────────────────┐     ┌──────────────────┐
+    │ Action Item Pipeline│     │  Deal Pipeline    │
+    └──────────┬──────────┘     └──────────┬───────┘
+               │                           │
+               └─────────────┬─────────────┘
+                             ▼
                     ┌────────────────┐
-                    │  Single Neo4j  │
-                    │  AuraDB        │
-                    │  (NEO4J_URI)   │
+                    │ Single Neo4j   │
+                    │ AuraDB         │
                     └────────────────┘
 ```
 
@@ -137,9 +156,57 @@ Within this repo, `EnvelopeDispatcher` runs the Action Item and Deal pipelines c
                   └─────────────────────┘
 ```
 
-**Entry point**: `EnvelopeDispatcher.dispatch(envelope)` in `src/dispatcher/dispatcher.py`
+**Entry points**: `POST /process` in `src/action_item_graph/api/routes/process.py` (Railway API), or `EnvelopeDispatcher.dispatch(envelope)` in `src/dispatcher/dispatcher.py` (direct)
 
 See [docs/DEAL_SERVICE_ARCHITECTURE.md](./docs/DEAL_SERVICE_ARCHITECTURE.md) for detailed Deal pipeline architecture.
+
+---
+
+## Event Consumer Architecture
+
+The event consumer system connects upstream publishers to the dual-pipeline processor:
+
+### Data Flow
+
+```
+EventBridge event → SQS queue → Lambda forwarder → Railway FastAPI → EnvelopeDispatcher
+```
+
+1. **EventBridge rule** matches events from `com.yourapp.transcription` (transcripts, notes, meetings) and `com.eq.email-pipeline` (emails)
+2. **SQS queue** (`action-item-graph-queue`) buffers events with 720s visibility timeout and a DLQ (`action-item-graph-dlq`, maxReceiveCount=3)
+3. **Lambda forwarder** (`action-item-graph-ingest`) parses the EventBridge wrapper, extracts the `detail` (EnvelopeV1 JSON), and POSTs it to Railway
+4. **Railway FastAPI service** validates the envelope, initializes pipelines from persistent clients, and dispatches through `EnvelopeDispatcher`
+
+### Railway API Service
+
+| Aspect | Detail |
+|--------|--------|
+| Module | `src/action_item_graph/api/` |
+| Framework | FastAPI with async lifespan |
+| Endpoints | `GET /health` (Neo4j connectivity), `POST /process` (envelope processing) |
+| Auth | Bearer token via `WORKER_API_KEY` |
+| Clients | Neo4jClient + DealNeo4jClient + OpenAIClient (initialized once at startup, stored in `app.state`) |
+| Config | pydantic-settings (`Settings` class in `api/config.py`) |
+| Start command | `uvicorn action_item_graph.api.main:app --host 0.0.0.0 --port $PORT` |
+
+### Lambda Forwarder
+
+| Aspect | Detail |
+|--------|--------|
+| Module | `src/action_item_graph/lambda_ingest/` |
+| Runtime | Python 3.11, arm64, 256MB, 120s timeout |
+| Tools | AWS Lambda Powertools (BatchProcessor, Logger, Tracer) |
+| Retry | 5xx: exponential backoff + jitter (max 2 retries). 4xx: no retry |
+| Config | pydantic-settings (`LambdaConfig` in `lambda_ingest/config.py`) |
+| Packaging | `scripts/package_lambda.sh` → `dist/action-item-graph-ingest.zip` (~19MB) |
+| Dependencies | pydantic, pydantic-settings, httpx, aws-lambda-powertools[tracer] |
+
+### Design Decisions
+
+- **Own SQS queue** (not sharing with thematic-lm): SQS is point-to-point — sharing would cause message competition
+- **Thin Lambda → persistent service**: Processing takes 60-90s with OpenAI API calls. Railway keeps Neo4j/OpenAI connections warm; Lambda has no state to manage
+- **BatchSize=1**: Each envelope triggers 60-90s of processing. Batching would increase Lambda execution time without benefit
+- **Synchronous processing**: Lambda waits for Railway's response. On success, SQS deletes the message. On failure, SQS retries up to 3x before DLQ
 
 ---
 
@@ -535,6 +602,10 @@ This enables:
 | Logging | structlog (structured JSON) |
 | Identity | UUIDv7 (RFC 9562) via fastuuid for Deal opportunity_id |
 | Package Manager | uv |
+| API Framework | FastAPI 0.115+ with uvicorn (Railway service) |
+| Lambda Tools | AWS Lambda Powertools (BatchProcessor, Logger, Tracer) |
+| HTTP Client | httpx (Lambda → Railway forwarding) |
+| Configuration | pydantic-settings (both Railway and Lambda) |
 
 ---
 
@@ -544,6 +615,7 @@ This enables:
 - [Graph Integration Proposal](./docs/GRAPH_INTEGRATION_PROPOSAL.md) — Feasibility analysis for single-database architecture, concurrency safety proofs
 - [Smoke Test Guide](./docs/SMOKE_TEST_GUIDE.md) — E2E validation procedures and historical results
 - [Live E2E Test Results](./docs/LIVE_E2E_TEST_RESULTS.md) — Most recent live run validation record
+- [Event Consumer Design](./docs/plans/2026-02-22-event-consumer-design.md) — EventBridge → SQS → Lambda → Railway architecture design
 - [Pipeline Guide](./docs/PIPELINE_GUIDE.md) — Comprehensive pipeline usage guide
 - [Topic Grouping](./docs/PHASE7_TOPIC_GROUPING.md) — Topic feature documentation
 - [API Reference](./docs/API.md) — API reference

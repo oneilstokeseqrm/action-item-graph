@@ -7,15 +7,16 @@ This document provides a detailed explanation of the Action Item Pipeline archit
 ## Table of Contents
 
 1. [Overview](#overview)
-2. [Core Concepts](#core-concepts)
-3. [Pipeline Architecture](#pipeline-architecture)
-4. [Dual Embedding Strategy](#dual-embedding-strategy)
-5. [Multi-Tenancy & Scoping](#multi-tenancy--scoping)
-6. [Component Deep Dives](#component-deep-dives)
-7. [Graph Schema Design](#graph-schema-design)
-8. [LLM Integration Patterns](#llm-integration-patterns)
-9. [Replication Guide](#replication-guide)
-10. [Performance Considerations](#performance-considerations)
+2. [Event Ingestion](#event-ingestion)
+3. [Core Concepts](#core-concepts)
+4. [Pipeline Architecture](#pipeline-architecture)
+5. [Dual Embedding Strategy](#dual-embedding-strategy)
+6. [Multi-Tenancy & Scoping](#multi-tenancy--scoping)
+7. [Component Deep Dives](#component-deep-dives)
+8. [Graph Schema Design](#graph-schema-design)
+9. [LLM Integration Patterns](#llm-integration-patterns)
+10. [Replication Guide](#replication-guide)
+11. [Performance Considerations](#performance-considerations)
 
 ---
 
@@ -37,6 +38,58 @@ The Action Item Pipeline is a temporal knowledge graph system that:
 | **Enable clustering** | Topic grouping with threshold-based matching |
 | **Ensure isolation** | tenant_id + account_id scoping on all queries |
 | **Maintain provenance** | EXTRACTED_FROM relationships to source interactions |
+
+---
+
+## Event Ingestion
+
+Before the pipeline processes an envelope, it must arrive at the system. There are two entry paths:
+
+### Production Path: EventBridge → SQS → Lambda → Railway
+
+```
+Upstream publisher
+    → EventBridge (default bus)
+        → action-item-graph-queue (SQS)
+            → action-item-graph-ingest (Lambda)
+                → POST /process (Railway FastAPI)
+                    → EnvelopeDispatcher
+                        → ActionItemPipeline + DealPipeline
+```
+
+1. Upstream services publish events to EventBridge with source `com.yourapp.transcription` (transcripts, notes, meetings) or `com.eq.email-pipeline` (emails)
+2. The `action-item-graph-rule` EventBridge rule routes matching events to `action-item-graph-queue` (SQS)
+3. The `action-item-graph-ingest` Lambda function is triggered by SQS. It extracts the `detail` field from the EventBridge wrapper and POSTs the raw EnvelopeV1 JSON to the Railway service
+4. The Railway FastAPI service at `POST /process` validates the envelope, builds pipeline instances from persistent clients (Neo4j + OpenAI), and dispatches through `EnvelopeDispatcher`
+
+### Direct Path: Library Usage
+
+```python
+from dispatcher import EnvelopeDispatcher
+
+dispatcher = EnvelopeDispatcher.from_env()
+result = await dispatcher.dispatch(envelope)
+```
+
+Used for local development, testing, and the live E2E smoke test (`scripts/run_live_e2e.py`).
+
+### Supported Event Types
+
+| EventBridge detail-type | interaction_type | content_format | Typical source |
+|---|---|---|---|
+| `EnvelopeV1.transcript` | `transcript` | `diarized` or `plain` | live-transcription-fastapi |
+| `EnvelopeV1.note` | `note` | `plain` or `markdown` | live-transcription-fastapi |
+| `EnvelopeV1.meeting` | `meeting` | `diarized` or `plain` | live-transcription-fastapi |
+| `EnvelopeV1.email` | `email` | `email` | eq-email-pipeline |
+
+Email events carry additional metadata in the `extras` dict: `subject`, `from_email`, `direction`, `thread_key`, `has_attachments`.
+
+### Error Handling
+
+- **Lambda retry**: On 5xx from Railway, the Lambda retries with exponential backoff + jitter (max 2 retries)
+- **SQS retry**: If the Lambda fails (all retries exhausted), SQS makes the message visible again. After 3 total receive attempts, the message moves to the DLQ (`action-item-graph-dlq`)
+- **4xx errors**: Not retried (indicates invalid payload — would fail again)
+- **Pipeline fault isolation**: Even if one pipeline (Action Item or Deal) throws an exception, the other still completes via `asyncio.gather(return_exceptions=True)`
 
 ---
 
