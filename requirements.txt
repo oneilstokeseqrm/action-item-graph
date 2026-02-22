@@ -1,0 +1,2 @@
+# Railway deployment: install the package with API dependencies
+-e ".[api]"
