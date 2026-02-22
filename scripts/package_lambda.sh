@@ -33,7 +33,8 @@ uv pip install \
 # 2. Copy only the lambda_ingest subpackage
 echo "--- Copying Lambda code ---"
 mkdir -p "$BUILD_DIR/action_item_graph/lambda_ingest"
-cp "$PROJECT_DIR/src/action_item_graph/__init__.py" "$BUILD_DIR/action_item_graph/" 2>/dev/null || touch "$BUILD_DIR/action_item_graph/__init__.py"
+# Create a minimal __init__.py — the real one eagerly imports pipeline/repository/etc.
+echo '"""Action Item Graph — Lambda-compatible stub."""' > "$BUILD_DIR/action_item_graph/__init__.py"
 cp "$PROJECT_DIR/src/action_item_graph/lambda_ingest/"*.py "$BUILD_DIR/action_item_graph/lambda_ingest/"
 
 # 3. Create zip
