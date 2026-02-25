@@ -122,11 +122,13 @@ All enrichment pipelines use `IS UNIQUE` constraints, matching the structured da
     └──────────┬──────────┘     └──────────┬───────┘
                │                           │
                └─────────────┬─────────────┘
-                             ▼
-                    ┌────────────────┐
-                    │ Single Neo4j   │
-                    │ AuraDB         │
-                    └────────────────┘
+                             │
+                ┌────────────┴────────────┐
+                ▼                         ▼
+       ┌────────────────┐      ┌──────────────────┐
+       │ Single Neo4j   │      │ Neon Postgres    │
+       │ AuraDB         │      │ (dual-write)     │
+       └────────────────┘      └──────────────────┘
 ```
 
 Within this repo, `EnvelopeDispatcher` runs the Action Item and Deal pipelines concurrently:
@@ -150,15 +152,75 @@ Within this repo, `EnvelopeDispatcher` runs the Action Item and Deal pipelines c
     └──────────┬──────────┘     └──────────┬──────────┘
                |                           |
                └─────────────┬─────────────┘
-                             v
-                  ┌─────────────────────┐
-                  │   Shared Neo4j DB   │
-                  └─────────────────────┘
+                             |
+                ┌────────────┴────────────┐
+                v                         v
+     ┌─────────────────┐      ┌──────────────────┐
+     │ Shared Neo4j DB │      │  Neon Postgres   │
+     │ (source of truth)│     │  (projection)    │
+     └─────────────────┘      └──────────────────┘
 ```
 
 **Entry points**: `POST /process` in `src/action_item_graph/api/routes/process.py` (Railway API), or `EnvelopeDispatcher.dispatch(envelope)` in `src/dispatcher/dispatcher.py` (direct)
 
 See [docs/DEAL_SERVICE_ARCHITECTURE.md](./docs/DEAL_SERVICE_ARCHITECTURE.md) for detailed Deal pipeline architecture.
+
+---
+
+## Postgres Dual-Write (Phase A: Action Items)
+
+The ActionItemPipeline performs a dual-write after Neo4j persistence: extracted data is also written to the eq-frontend Neon Postgres database. Neo4j remains the source of truth; Postgres is a read-optimized projection for the frontend.
+
+### Architecture
+
+- **Client**: `PostgresClient` in `src/action_item_graph/clients/postgres_client.py` (SQLAlchemy 2.0 async engine + asyncpg)
+- **Wiring**: Optional `postgres_client` parameter on `ActionItemPipeline.__init__`. Created from `NEON_DATABASE_URL` env var at startup.
+- **Trigger**: After merge + topic resolution completes, `_dual_write_postgres()` writes all results to Postgres.
+
+### Failure Isolation
+
+Postgres writes are individually wrapped in try/except at three levels:
+
+1. **Per-entity**: Each action item, owner, entity link, topic, and membership write is individually caught
+2. **Per-phase**: `_pg_write_action_items()` and `_pg_write_topics()` are independently caught
+3. **Top-level**: `_dual_write_postgres()` catches any remaining exceptions
+
+A Postgres failure **never** blocks or affects the Neo4j write or pipeline result.
+
+### What Gets Written
+
+| Neo4j Entity | Postgres Table | Operation |
+|-------------|---------------|-----------|
+| ActionItem | `action_items` | UPSERT (keyed on `graph_action_item_id`) |
+| ActionItemVersion | `action_item_versions` | INSERT |
+| Owner | `action_item_owners` | UPSERT (keyed on `owner_id`) |
+| ActionItemTopic | `action_item_topics` | UPSERT (keyed on `action_item_topic_id`) |
+| ActionItemTopicVersion | `action_item_topic_versions` | INSERT |
+| BELONGS_TO relationship | `action_item_topic_memberships` | UPSERT |
+| EXTRACTED_FROM / HAS_ACTION_ITEM | `action_item_links` | INSERT (polymorphic) |
+
+### Field Mapping
+
+Key field name differences between Neo4j and Postgres:
+
+| Neo4j Property | Postgres Column | Notes |
+|---------------|----------------|-------|
+| `summary` | `title` | Display-friendly name |
+| `action_item_text` | `description` | Full extracted text |
+| `status: 'open'` | `status: 'pending'` | Enum value mapping |
+| `action_item_id` | `graph_action_item_id` | Cross-reference UUID |
+
+### Postgres Tables (eq-frontend)
+
+5 new tables and 15 new columns on `action_items` were added via Prisma migration in the eq-frontend repo (branch `feat/action-item-graph-sync-schema`):
+
+- `action_item_versions` — SCD Type 2 version history
+- `action_item_topics` — Topic groups with embeddings
+- `action_item_topic_versions` — Topic version history
+- `action_item_topic_memberships` — Action item ↔ topic many-to-many
+- `action_item_owners` — Canonical owner names with aliases
+
+All tables have RLS policies (`tenant_id` isolation) and appropriate indexes.
 
 ---
 
@@ -602,6 +664,7 @@ This enables:
 | Logging | structlog (structured JSON) |
 | Identity | UUIDv7 (RFC 9562) via fastuuid for Deal opportunity_id |
 | Package Manager | uv |
+| Postgres Dual-Write | SQLAlchemy 2.0 async + asyncpg (Neon Postgres projection) |
 | API Framework | FastAPI 0.115+ with uvicorn (Railway service) |
 | Lambda Tools | AWS Lambda Powertools (BatchProcessor, Logger, Tracer) |
 | HTTP Client | httpx (Lambda → Railway forwarding) |

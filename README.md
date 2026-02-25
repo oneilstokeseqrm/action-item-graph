@@ -13,6 +13,7 @@ A temporal knowledge graph pipeline for extracting and managing action items fro
 - **Dual Embeddings**: Prevents embedding drift with immutable original + mutable current embeddings
 - **Deal Extraction Pipeline**: Concurrent deal detection using MEDDIC-structured extraction, vector matching with graduated thresholds, and LLM-synthesized merging
 - **Dual-Pipeline Dispatcher**: Routes each envelope to both Action Item and Deal pipelines concurrently with fault isolation
+- **Postgres Dual-Write**: Optional projection of action items, topics, and versions to Neon Postgres for frontend reads (Neo4j remains source of truth)
 
 ## Installation
 
@@ -59,6 +60,11 @@ DEAL_NEO4J_PASSWORD=your-password                     # same credentials
 # NEO4J_DATABASE=neo4j                   # defaults to 'neo4j'
 # DEAL_SIMILARITY_THRESHOLD=0.70         # Vector match threshold
 # DEAL_AUTO_MATCH_THRESHOLD=0.90         # Auto-match (skip LLM) threshold
+
+# Optional — Postgres Dual-Write (Neon)
+# NEON_DATABASE_URL=postgresql://user:pass@host/db  # Enables Postgres projection
+# When set, ActionItemPipeline writes to both Neo4j and Postgres.
+# Postgres failures never block Neo4j writes.
 
 # Optional — General
 # OPENAI_MODEL=gpt-4.1-mini             # defaults to gpt-4.1-mini
@@ -262,9 +268,16 @@ nodes via defensive MERGE:
                                    │
                                    ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                       Neo4j Graph Store                              │
+│                       Neo4j Graph Store (source of truth)            │
 │  Nodes: Account, Interaction, ActionItem, ActionItemTopic, Owner, +  │
 │  Vector indexes: ActionItem + ActionItemTopic (embedding + current)  │
+└─────────────────────────────────────────────────────────────────────┘
+                                   │
+                                   ▼ (optional dual-write)
+┌─────────────────────────────────────────────────────────────────────┐
+│                    Neon Postgres (projection)                        │
+│  Tables: action_items, action_item_versions, action_item_topics,    │
+│  action_item_topic_memberships, action_item_owners                  │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -336,6 +349,9 @@ pytest tests/test_dispatcher.py -v
 
 # Event consumer (Railway API + Lambda)
 pytest tests/test_api_config.py tests/test_api_auth.py tests/test_api_health.py tests/test_api_process.py tests/test_api_main.py tests/test_lambda_config.py tests/test_lambda_envelope.py tests/test_lambda_api_client.py tests/test_lambda_handler.py -v
+
+# Postgres dual-write
+pytest tests/test_postgres_client.py tests/test_pipeline_dual_write.py -v
 
 # Duplicate-text regression tests
 pytest tests/test_duplicate_text.py -v
@@ -496,7 +512,8 @@ action-item-graph/
 │   ├── repository.py         # Graph CRUD operations
 │   ├── clients/
 │   │   ├── neo4j_client.py   # Neo4j connection & queries
-│   │   └── openai_client.py  # OpenAI API wrapper
+│   │   ├── openai_client.py  # OpenAI API wrapper
+│   │   └── postgres_client.py # Postgres dual-write (SQLAlchemy 2.0 + asyncpg)
 │   ├── models/
 │   │   ├── envelope.py       # EnvelopeV1 input format
 │   │   ├── action_item.py    # ActionItem, ActionItemVersion
@@ -532,9 +549,11 @@ action-item-graph/
 │   ├── test_deal_matcher.py       # Deal entity resolution
 │   ├── test_deal_merger.py        # Deal merge synthesis
 │   ├── test_dispatcher.py         # Dual-pipeline dispatch
+│   ├── test_postgres_client.py     # PostgresClient unit tests (38 tests)
+│   ├── test_pipeline_dual_write.py # Dual-write pipeline integration (28 tests)
 │   ├── test_duplicate_text.py     # Duplicate-text regression
 │   ├── test_uuid7.py              # UUIDv7 identity tests
-│   └── ...                        # 22 test files total
+│   └── ...                        # 24 test files total
 ├── examples/
 │   ├── process_transcript.py # Basic usage example
 │   ├── run_transcript_tests.py # Transcript test runner
