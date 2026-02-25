@@ -30,6 +30,7 @@ load_dotenv(Path(__file__).parent.parent / '.env')
 
 from action_item_graph.clients.neo4j_client import Neo4jClient
 from action_item_graph.clients.openai_client import OpenAIClient
+from action_item_graph.clients.postgres_client import PostgresClient
 from action_item_graph.models.envelope import (
     ContentFormat,
     ContentPayload,
@@ -685,6 +686,70 @@ async def verify_cross_pipeline_merge(
 
 
 # =============================================================================
+# Postgres Dual-Write Verification
+# =============================================================================
+
+
+async def query_postgres_state(postgres: PostgresClient, tenant_id: str) -> dict:
+    """Query Postgres tables to verify dual-write data landed correctly."""
+    print("\n--- POSTGRES DUAL-WRITE: FINAL STATE ---")
+
+    results = {}
+    queries = {
+        'action_items': (
+            "SELECT COUNT(*) as count FROM action_items "
+            "WHERE graph_action_item_id IS NOT NULL AND tenant_id = :tid"
+        ),
+        'action_item_topics': (
+            "SELECT COUNT(*) as count FROM action_item_topics "
+            "WHERE tenant_id = :tid"
+        ),
+        'action_item_topic_memberships': (
+            "SELECT COUNT(*) as count FROM action_item_topic_memberships "
+            "WHERE tenant_id = :tid"
+        ),
+        'action_item_owners': (
+            "SELECT COUNT(*) as count FROM action_item_owners "
+            "WHERE tenant_id = :tid"
+        ),
+    }
+
+    from sqlalchemy import text as sa_text
+
+    for table, query in queries.items():
+        try:
+            async with postgres.engine.begin() as conn:
+                row = await conn.execute(sa_text(query), {'tid': tenant_id})
+                count = row.scalar() or 0
+            results[table] = count
+            print(f"  {table}: {count} rows")
+        except Exception as e:
+            results[table] = f"ERROR: {e}"
+            print(f"  {table}: ERROR — {e}")
+
+    # Spot-check a few action items
+    try:
+        async with postgres.engine.begin() as conn:
+            rows = await conn.execute(
+                sa_text(
+                    "SELECT title, status, owner_name FROM action_items "
+                    "WHERE graph_action_item_id IS NOT NULL AND tenant_id = :tid "
+                    "LIMIT 5"
+                ),
+                {'tid': tenant_id},
+            )
+            samples = rows.fetchall()
+        if samples:
+            print(f"\n  Sample action items:")
+            for row in samples:
+                print(f"    - {row[0]} | status={row[1]} | owner={row[2]}")
+    except Exception as e:
+        print(f"  Sample query failed: {e}")
+
+    return results
+
+
+# =============================================================================
 # Summary Report
 # =============================================================================
 
@@ -814,6 +879,7 @@ async def main():
 
     ai_pipeline = None
     dispatcher = None
+    postgres = None
 
     try:
         # Connect and set up schemas
@@ -832,6 +898,20 @@ async def main():
             print(f"WARNING: Skeleton schema verification failed: {e}")
             print("Continuing anyway — MERGE-based operations may still work.")
 
+        # Postgres dual-write (optional — skip if NEON_DATABASE_URL not set)
+        neon_url = os.getenv('NEON_DATABASE_URL')
+        if neon_url:
+            postgres = PostgresClient(neon_url)
+            await postgres.connect()
+            if await postgres.verify_connectivity():
+                print("Postgres (Neon): connected and ready for dual-write")
+            else:
+                print("WARNING: Postgres connectivity check failed — disabling dual-write")
+                await postgres.close()
+                postgres = None
+        else:
+            print("Postgres: NEON_DATABASE_URL not set — skipping dual-write")
+
         # Clean shared database
         print(f"\n{'=' * 70}")
         print("CLEANING SHARED DATABASE")
@@ -839,7 +919,9 @@ async def main():
         await clean_database(ai_neo4j, tenant_id_str)
 
         # Build pipelines and dispatcher
-        ai_pipeline = ActionItemPipeline(openai, ai_neo4j, enable_topics=True)
+        ai_pipeline = ActionItemPipeline(
+            openai, ai_neo4j, enable_topics=True, postgres_client=postgres,
+        )
         deal_pipeline = DealPipeline(deal_neo4j, openai)
         dispatcher = EnvelopeDispatcher(ai_pipeline, deal_pipeline)
 
@@ -877,8 +959,30 @@ async def main():
             ai_neo4j, tenant_id_str, account_id, all_results,
         )
 
+        # Postgres dual-write verification
+        pg_state = None
+        if postgres is not None:
+            print(f"\n{'=' * 70}")
+            print("POSTGRES DUAL-WRITE VERIFICATION")
+            print("=" * 70)
+            pg_state = await query_postgres_state(postgres, tenant_id_str)
+
+            # Compare Neo4j vs Postgres counts
+            neo4j_ai_count = len(ai_state['action_items'])
+            pg_ai_count = pg_state.get('action_items', 0)
+            if isinstance(pg_ai_count, int):
+                if pg_ai_count == neo4j_ai_count:
+                    print(f"\n  [PASS] Action item count matches: Neo4j={neo4j_ai_count}, Postgres={pg_ai_count}")
+                else:
+                    print(f"\n  [WARN] Count mismatch: Neo4j={neo4j_ai_count}, Postgres={pg_ai_count}")
+
         # Print comprehensive summary
         print_summary_report(all_results, ai_state, deal_state, data, total_time_ms)
+
+        if pg_state is not None:
+            print(f"\n--- POSTGRES DUAL-WRITE SUMMARY ---")
+            for table, count in pg_state.items():
+                print(f"  {table}: {count}")
 
     except Exception as e:
         print(f"\nFATAL ERROR: {e}")
@@ -894,6 +998,8 @@ async def main():
             await ai_neo4j.close()
             await openai.close()
         await deal_neo4j.close()
+        if postgres is not None:
+            await postgres.close()
 
 
 if __name__ == '__main__':

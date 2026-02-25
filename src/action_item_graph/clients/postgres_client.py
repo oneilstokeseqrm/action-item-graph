@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from typing import Any
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 from uuid import UUID
 
 import structlog
@@ -56,13 +57,34 @@ def _to_pg_uuid(val: UUID | str | None) -> str | None:
     return str(val)
 
 
-def _to_pg_ts(val: datetime | str | None) -> str | None:
-    """Convert datetime to ISO string for Postgres, or None."""
+def _to_pg_ts(val: datetime | str | None) -> datetime | None:
+    """Ensure value is a datetime for asyncpg (which needs native types, not strings).
+
+    If already a datetime, return as-is. If an ISO string, parse it.
+    """
     if val is None:
         return None
     if isinstance(val, datetime):
-        return val.isoformat()
-    return val
+        return val
+    # Parse ISO string back to datetime for asyncpg compatibility
+    return datetime.fromisoformat(val)
+
+
+def _sanitize_url(url: str) -> str:
+    """Remove URL query params that asyncpg does not understand.
+
+    Neon pooler URLs include ``channel_binding=require`` and ``sslmode=require``
+    which are libpq parameters. asyncpg rejects unknown connection params.
+    SQLAlchemy's asyncpg dialect handles SSL via ``connect_args`` instead.
+    """
+    _STRIP_PARAMS = {'channel_binding', 'sslmode'}
+    parsed = urlparse(url)
+    if not parsed.query:
+        return url
+    params = parse_qs(parsed.query)
+    filtered = {k: v for k, v in params.items() if k not in _STRIP_PARAMS}
+    new_query = urlencode(filtered, doseq=True)
+    return urlunparse(parsed._replace(query=new_query))
 
 
 def _embedding_to_pgvector(embedding: list[float] | None) -> str | None:
@@ -108,6 +130,9 @@ class PostgresClient:
         if not url:
             raise ValueError('database_url is required')
 
+        # Strip query params unsupported by asyncpg (e.g. channel_binding)
+        url = _sanitize_url(url)
+
         # Normalise driver prefix for asyncpg
         if url.startswith('postgres://'):
             url = url.replace('postgres://', 'postgresql+asyncpg://', 1)
@@ -121,6 +146,12 @@ class PostgresClient:
             pool_pre_ping=True,
             # Neon serverless can be slow on first connect
             pool_timeout=30,
+            # Neon pooler (PgBouncer) doesn't support prepared statements.
+            # ssl='require' replaces the stripped sslmode query param.
+            connect_args={
+                'prepared_statement_cache_size': 0,
+                'ssl': 'require',
+            },
         )
         logger.info('postgres_client.connected')
 
@@ -505,9 +536,9 @@ class PostgresClient:
         """
         sql = text("""
             INSERT INTO action_item_links (
-                tenant_id, action_item_id, entity_type, entity_id
+                id, tenant_id, action_item_id, entity_type, entity_id
             ) VALUES (
-                :tenant_id, :action_item_id,
+                gen_random_uuid(), :tenant_id, :action_item_id,
                 CAST(:entity_type AS "ActionItemLinkEntityType"),
                 :entity_id
             )

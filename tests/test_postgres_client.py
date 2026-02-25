@@ -28,6 +28,7 @@ from action_item_graph.clients.postgres_client import (
     PostgresClient,
     _embedding_to_pgvector,
     _map_status,
+    _sanitize_url,
     _to_pg_ts,
     _to_pg_uuid,
 )
@@ -202,11 +203,13 @@ class TestHelpers:
 
     def test_to_pg_ts_with_datetime(self):
         dt = datetime(2026, 2, 25, 12, 30)
-        assert _to_pg_ts(dt) == dt.isoformat()
+        assert _to_pg_ts(dt) is dt  # pass-through, no conversion
 
     def test_to_pg_ts_with_string(self):
         s = '2026-02-25T12:30:00'
-        assert _to_pg_ts(s) == s
+        result = _to_pg_ts(s)
+        assert isinstance(result, datetime)
+        assert result == datetime(2026, 2, 25, 12, 30)
 
     def test_to_pg_ts_with_none(self):
         assert _to_pg_ts(None) is None
@@ -607,3 +610,81 @@ class TestPersistActionItemFull:
             item=sample_action_item,
             topic=sample_topic,
         )
+
+
+# =============================================================================
+# URL Sanitization & Neon Pooler Compatibility Tests
+# =============================================================================
+
+
+class TestSanitizeUrl:
+    """Test URL cleanup for asyncpg compatibility."""
+
+    def test_strips_channel_binding(self):
+        url = 'postgresql://user:pass@host/db?sslmode=require&channel_binding=require'
+        result = _sanitize_url(url)
+        assert 'channel_binding' not in result
+        assert 'sslmode' not in result
+
+    def test_strips_sslmode(self):
+        url = 'postgresql://user:pass@host/db?sslmode=require'
+        result = _sanitize_url(url)
+        assert 'sslmode' not in result
+
+    def test_no_query_params_unchanged(self):
+        url = 'postgresql://user:pass@host/db'
+        result = _sanitize_url(url)
+        assert result == url
+
+    def test_strips_only_libpq_params(self):
+        url = 'postgresql://user:pass@host/db?sslmode=require&channel_binding=require&options=test'
+        result = _sanitize_url(url)
+        assert 'channel_binding' not in result
+        assert 'sslmode' not in result
+        assert 'options=test' in result
+
+    def test_neon_pooler_url(self):
+        """Full Neon pooler URL with channel_binding and sslmode is sanitized correctly."""
+        url = (
+            'postgresql://neondb_owner:npg_xxx@ep-silent-waterfall-adtinpn1-pooler'
+            '.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require'
+        )
+        result = _sanitize_url(url)
+        assert 'channel_binding' not in result
+        assert 'sslmode' not in result
+        assert 'ep-silent-waterfall-adtinpn1-pooler' in result
+
+
+class TestNeonPoolerConnectArgs:
+    """Test that connect() passes prepared_statement_cache_size=0 for PgBouncer compat."""
+
+    @pytest.mark.asyncio
+    async def test_connect_passes_prepared_statement_cache_size_zero(self):
+        pg = PostgresClient()
+        with patch(
+            'action_item_graph.clients.postgres_client.create_async_engine'
+        ) as mock_create:
+            mock_create.return_value = AsyncMock()
+            await pg.connect('postgresql://localhost/test')
+
+            call_kwargs = mock_create.call_args[1]
+            assert call_kwargs['connect_args'] == {
+                'prepared_statement_cache_size': 0,
+                'ssl': 'require',
+            }
+
+    @pytest.mark.asyncio
+    async def test_connect_strips_channel_binding_from_url(self):
+        pg = PostgresClient()
+        with patch(
+            'action_item_graph.clients.postgres_client.create_async_engine'
+        ) as mock_create:
+            mock_create.return_value = AsyncMock()
+            await pg.connect(
+                'postgresql://user:pass@host/db?sslmode=require&channel_binding=require'
+            )
+
+            call_args = mock_create.call_args
+            url = call_args[0][0]
+            assert 'channel_binding' not in url
+            assert 'sslmode' not in url
