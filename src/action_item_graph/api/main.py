@@ -7,6 +7,7 @@ from fastapi import FastAPI
 
 from action_item_graph.clients.neo4j_client import Neo4jClient
 from action_item_graph.clients.openai_client import OpenAIClient
+from action_item_graph.clients.postgres_client import PostgresClient
 from deal_graph.clients.neo4j_client import DealNeo4jClient
 
 from .config import get_settings
@@ -46,10 +47,23 @@ async def lifespan(app: FastAPI):
     # OpenAI — shared across both pipelines
     openai = OpenAIClient(api_key=settings.OPENAI_API_KEY)
 
+    # Postgres (Neon) — dual-write projection (optional, failure-isolated)
+    postgres: PostgresClient | None = None
+    if settings.NEON_DATABASE_URL:
+        pg = PostgresClient(settings.NEON_DATABASE_URL)
+        await pg.connect()
+        if await pg.verify_connectivity():
+            postgres = pg
+            logger.info("lifespan.postgres_ready")
+        else:
+            logger.warning("lifespan.postgres_connectivity_failed")
+            await pg.close()
+
     # Store on app.state for request handlers
     app.state.neo4j = neo4j
     app.state.deal_neo4j = deal_neo4j
     app.state.openai = openai
+    app.state.postgres = postgres
 
     logger.info("lifespan.ready")
     yield
@@ -58,6 +72,8 @@ async def lifespan(app: FastAPI):
     logger.info("lifespan.shutdown")
     await neo4j.close()
     await deal_neo4j.close()
+    if postgres is not None:
+        await postgres.close()
 
 
 app = FastAPI(

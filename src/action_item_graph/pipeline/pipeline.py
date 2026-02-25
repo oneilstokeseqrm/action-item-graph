@@ -12,6 +12,9 @@ Provides end-to-end processing:
 8. Return results with created/updated IDs
 """
 
+from __future__ import annotations
+
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -19,6 +22,7 @@ from uuid import UUID
 
 from ..clients.neo4j_client import Neo4jClient
 from ..clients.openai_client import OpenAIClient
+from ..clients.postgres_client import PostgresClient
 from ..errors import (
     ExtractionError,
     MatchingError,
@@ -28,14 +32,15 @@ from ..errors import (
 )
 from ..logging import PipelineTimer, get_logger, logging_context
 from ..models.action_item import ActionItem
-from ..models.entities import Interaction
+from ..models.entities import Interaction, Owner
 from ..models.envelope import EnvelopeV1
+from ..models.topic import ActionItemTopic
 from ..repository import ActionItemRepository
 from .extractor import ActionItemExtractor, ExtractionOutput
 from .matcher import ActionItemMatcher, MatchResult
 from .merger import ActionItemMerger, MergeResult
+from .topic_executor import TopicExecutionResult, TopicExecutor
 from .topic_resolver import TopicResolver
-from .topic_executor import TopicExecutor, TopicExecutionResult
 
 logger = get_logger(__name__)
 
@@ -137,6 +142,7 @@ class ActionItemPipeline:
         openai_client: OpenAIClient,
         neo4j_client: Neo4jClient,
         enable_topics: bool = True,
+        postgres_client: PostgresClient | None = None,
     ):
         """
         Initialize the pipeline with required clients.
@@ -145,10 +151,12 @@ class ActionItemPipeline:
             openai_client: Connected OpenAI client for extraction/embeddings
             neo4j_client: Connected Neo4j client for graph operations
             enable_topics: Whether to enable topic grouping (default: True)
+            postgres_client: Optional Postgres client for dual-write projection
         """
         self.openai = openai_client
         self.neo4j = neo4j_client
         self.enable_topics = enable_topics
+        self.postgres = postgres_client
 
         # Initialize pipeline components
         self.extractor = ActionItemExtractor(openai_client)
@@ -161,7 +169,7 @@ class ActionItemPipeline:
         self.topic_executor = TopicExecutor(self.repository, openai_client)
 
     @classmethod
-    async def from_env(cls) -> 'ActionItemPipeline':
+    async def from_env(cls) -> ActionItemPipeline:
         """
         Create pipeline from environment variables.
 
@@ -171,6 +179,7 @@ class ActionItemPipeline:
             NEO4J_PASSWORD: Neo4j password
             NEO4J_USERNAME: Neo4j username (optional, defaults to 'neo4j')
             NEO4J_DATABASE: Neo4j database (optional, defaults to 'neo4j')
+            NEON_DATABASE_URL: Optional Neon Postgres URL for dual-write
 
         Returns:
             Configured and connected ActionItemPipeline
@@ -178,12 +187,23 @@ class ActionItemPipeline:
         openai = OpenAIClient()
         neo4j = Neo4jClient()
         await neo4j.connect()
-        return cls(openai, neo4j)
+
+        postgres: PostgresClient | None = None
+        neon_url = os.getenv('NEON_DATABASE_URL')
+        if neon_url:
+            pg = PostgresClient(neon_url)
+            await pg.connect()
+            postgres = pg
+            logger.info('pipeline.postgres_dual_write_enabled')
+
+        return cls(openai, neo4j, postgres_client=postgres)
 
     async def close(self) -> None:
         """Close all client connections."""
         await self.openai.close()
         await self.neo4j.close()
+        if self.postgres is not None:
+            await self.postgres.close()
 
     async def process_envelope(
         self,
@@ -327,6 +347,16 @@ class ActionItemPipeline:
                         topics_created=result.topics_created,
                         topics_linked=result.topics_linked,
                     )
+
+                # Step 7: Dual-write to Postgres (failure-isolated)
+                if self.postgres is not None:
+                    with timer.stage("postgres_dual_write"):
+                        await self._dual_write_postgres(
+                            merge_results=merge_results,
+                            action_items=filtered_action_items,
+                            interaction=extraction.interaction,
+                            topic_results=result.topic_results,
+                        )
 
             except ExtractionError as e:
                 logger.error("extraction_failed", error=str(e))
@@ -493,6 +523,16 @@ class ActionItemPipeline:
                     result.topic_results = topic_exec_results
                     result.topics_created = sum(1 for t in topic_exec_results if t.was_new)
                     result.topics_linked = sum(1 for t in topic_exec_results if not t.was_new)
+
+            # Dual-write to Postgres (failure-isolated)
+            if self.postgres is not None:
+                with timer.stage("postgres_dual_write"):
+                    await self._dual_write_postgres(
+                        merge_results=merge_results,
+                        action_items=filtered_action_items,
+                        interaction=extraction.interaction,
+                        topic_results=result.topic_results,
+                    )
 
             result.completed_at = datetime.now()
             result.processing_time_ms = int(timer.total_ms)
@@ -698,3 +738,240 @@ class ActionItemPipeline:
             topic_results.append(exec_result)
 
         return topic_results
+
+    # =========================================================================
+    # Postgres Dual-Write
+    # =========================================================================
+
+    async def _dual_write_postgres(
+        self,
+        merge_results: list[MergeResult],
+        action_items: list[ActionItem],
+        interaction: Interaction,
+        topic_results: list[TopicExecutionResult],
+    ) -> None:
+        """
+        Write action items, owners, topics, and memberships to Postgres.
+
+        This entire method is failure-isolated: any exception is logged
+        and swallowed so that Neo4j (source of truth) is never affected.
+        """
+        if self.postgres is None:
+            return
+
+        try:
+            await self._pg_write_action_items(merge_results, action_items, interaction)
+        except Exception:
+            logger.exception('postgres_dual_write.action_items_failed')
+
+        try:
+            await self._pg_write_topics(topic_results, action_items)
+        except Exception:
+            logger.exception('postgres_dual_write.topics_failed')
+
+    async def _pg_write_action_items(
+        self,
+        merge_results: list[MergeResult],
+        action_items: list[ActionItem],
+        interaction: Interaction,
+    ) -> None:
+        """Dual-write action items and owners for each merge result."""
+        assert self.postgres is not None
+
+        for merge_result, action_item in zip(merge_results, action_items):
+            try:
+                if merge_result.was_new:
+                    # For new items, the ActionItem model IS the current state
+                    pg_item = action_item
+                else:
+                    # For updated items, fetch post-merge state from Neo4j
+                    node = await self.repository.get_action_item(
+                        merge_result.action_item_id, action_item.tenant_id,
+                    )
+                    if node is None:
+                        continue
+                    pg_item = _neo4j_node_to_action_item(node)
+
+                await self.postgres.upsert_action_item(pg_item)
+
+                # Write owner if available in merge details
+                owner_name = merge_result.details.get(
+                    'owner_name', action_item.owner
+                )
+                if owner_name:
+                    owner_node = await self.repository.get_owner_by_name(
+                        action_item.tenant_id, owner_name,
+                    )
+                    if owner_node:
+                        owner = Owner(
+                            id=UUID(owner_node['owner_id']),
+                            tenant_id=action_item.tenant_id,
+                            canonical_name=owner_node.get('canonical_name', owner_name),
+                            aliases=owner_node.get('aliases', []),
+                            contact_id=owner_node.get('contact_id'),
+                            user_id=owner_node.get('user_id'),
+                        )
+                        try:
+                            await self.postgres.upsert_owner(owner)
+                        except Exception:
+                            logger.exception(
+                                'postgres_dual_write.owner_failed',
+                                owner_id=str(owner.id),
+                            )
+
+                # Entity links: account + interaction
+                item_id = UUID(merge_result.action_item_id)
+                if pg_item.account_id:
+                    try:
+                        await self.postgres.link_action_item_to_entity(
+                            tenant_id=pg_item.tenant_id,
+                            action_item_id=item_id,
+                            entity_type='account',
+                            entity_id=pg_item.account_id,
+                        )
+                    except Exception:
+                        logger.exception(
+                            'postgres_dual_write.link_account_failed',
+                            action_item_id=merge_result.action_item_id,
+                        )
+
+                try:
+                    await self.postgres.link_action_item_to_entity(
+                        tenant_id=pg_item.tenant_id,
+                        action_item_id=item_id,
+                        entity_type='interaction',
+                        entity_id=interaction.interaction_id,
+                    )
+                except Exception:
+                    logger.exception(
+                        'postgres_dual_write.link_interaction_failed',
+                        action_item_id=merge_result.action_item_id,
+                    )
+
+            except Exception:
+                logger.exception(
+                    'postgres_dual_write.item_failed',
+                    action_item_id=merge_result.action_item_id,
+                )
+
+    async def _pg_write_topics(
+        self,
+        topic_results: list[TopicExecutionResult],
+        action_items: list[ActionItem],
+    ) -> None:
+        """Dual-write topics and memberships for each topic result."""
+        assert self.postgres is not None
+
+        if not topic_results:
+            return
+
+        # Use first action item for tenant_id (all items share tenant)
+        tenant_id = action_items[0].tenant_id if action_items else None
+        if tenant_id is None:
+            return
+
+        for topic_result in topic_results:
+            try:
+                # Fetch topic from Neo4j (source of truth for current state)
+                topic_node = await self.repository.get_topic(
+                    topic_result.topic_id, tenant_id,
+                )
+                if topic_node is None:
+                    continue
+
+                topic = _neo4j_node_to_topic(topic_node)
+                await self.postgres.upsert_topic(topic)
+
+                # Membership link
+                await self.postgres.upsert_topic_membership(
+                    tenant_id=tenant_id,
+                    action_item_id=UUID(topic_result.action_item_id),
+                    topic_id=UUID(topic_result.topic_id),
+                    confidence=topic_result.details.get('confidence', 1.0),
+                    method=topic_result.details.get('method', 'extracted'),
+                )
+
+            except Exception:
+                logger.exception(
+                    'postgres_dual_write.topic_failed',
+                    topic_id=topic_result.topic_id,
+                    action_item_id=topic_result.action_item_id,
+                )
+
+
+# =============================================================================
+# Neo4j → Pydantic model helpers
+# =============================================================================
+
+
+def _parse_iso(val: Any) -> datetime | None:
+    """Parse an ISO datetime string or return None."""
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val
+    try:
+        return datetime.fromisoformat(str(val))
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_uuid(val: Any) -> UUID | None:
+    """Parse a UUID string or return None."""
+    if val is None:
+        return None
+    if isinstance(val, UUID):
+        return val
+    try:
+        return UUID(str(val))
+    except (ValueError, TypeError):
+        return None
+
+
+def _neo4j_node_to_action_item(node: dict[str, Any]) -> ActionItem:
+    """Convert a Neo4j ActionItem node dict to an ActionItem model."""
+    return ActionItem(
+        id=UUID(node['action_item_id']),
+        tenant_id=UUID(node['tenant_id']),
+        account_id=node.get('account_id'),
+        action_item_text=node.get('action_item_text', ''),
+        summary=node.get('summary', ''),
+        owner=node.get('owner', ''),
+        owner_type=node.get('owner_type', 'named'),
+        is_user_owned=node.get('is_user_owned', False),
+        conversation_context=node.get('conversation_context', ''),
+        due_date=_parse_iso(node.get('due_date')),
+        status=node.get('status', 'open'),
+        version=node.get('version', 1),
+        evolution_summary=node.get('evolution_summary', ''),
+        created_at=_parse_iso(node.get('created_at')) or datetime.now(),
+        last_updated_at=_parse_iso(node.get('last_updated_at')) or datetime.now(),
+        source_interaction_id=_parse_uuid(node.get('source_interaction_id')),
+        user_id=node.get('user_id'),
+        pg_user_id=_parse_uuid(node.get('pg_user_id')),
+        embedding=node.get('embedding'),
+        embedding_current=node.get('embedding_current'),
+        confidence=node.get('confidence', 1.0),
+        valid_at=_parse_iso(node.get('valid_at')),
+        invalid_at=_parse_iso(node.get('invalid_at')),
+        invalidated_by=_parse_uuid(node.get('invalidated_by')),
+    )
+
+
+def _neo4j_node_to_topic(node: dict[str, Any]) -> ActionItemTopic:
+    """Convert a Neo4j ActionItemTopic node dict to an ActionItemTopic model."""
+    return ActionItemTopic(
+        id=UUID(node['action_item_topic_id']),
+        tenant_id=UUID(node['tenant_id']),
+        account_id=node.get('account_id', ''),
+        name=node.get('name', ''),
+        canonical_name=node.get('canonical_name', ''),
+        summary=node.get('summary', ''),
+        embedding=node.get('embedding'),
+        embedding_current=node.get('embedding_current'),
+        action_item_count=node.get('action_item_count', 0),
+        created_at=_parse_iso(node.get('created_at')) or datetime.now(),
+        updated_at=_parse_iso(node.get('updated_at')) or datetime.now(),
+        created_from_action_item_id=_parse_uuid(node.get('created_from_action_item_id')),
+        version=node.get('version', 1),
+    )
