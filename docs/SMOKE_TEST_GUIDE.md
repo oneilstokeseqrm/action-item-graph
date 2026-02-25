@@ -2,7 +2,7 @@
 
 > Comprehensive reference for how both pipelines (Action Item + Deal) were validated end-to-end against live infrastructure.
 
-**Last validated**: 2026-02-11 (live E2E, single shared database)
+**Last validated**: 2026-02-25 (live E2E, single shared database + Postgres dual-write)
 
 ---
 
@@ -59,6 +59,9 @@ NEO4J_URI=neo4j+s://xxxxx.databases.neo4j.io
 NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=<password>
 NEO4J_DATABASE=neo4j
+
+# Neon Postgres (dual-write projection — optional, failure-isolated)
+NEON_DATABASE_URL=postgresql://neondb_owner:<password>@ep-<endpoint>-pooler.<region>.aws.neon.tech/neondb?sslmode=require&channel_binding=require
 ```
 
 ### Schema Provisioning
@@ -518,6 +521,78 @@ SHOW CONSTRAINTS YIELD name, type RETURN name, type ORDER BY name
 
 ---
 
+## 10. Postgres Dual-Write Verification
+
+### Overview
+
+The Action Item pipeline performs a **dual-write** to both Neo4j (source of truth) and Neon Postgres (read-optimized projection). The Postgres write is failure-isolated — it never blocks the Neo4j write. The live E2E script (`scripts/run_live_e2e.py`) automatically verifies Postgres data when `NEON_DATABASE_URL` is set.
+
+### Required Environment Variable
+
+```bash
+NEON_DATABASE_URL=postgresql://neondb_owner:<password>@ep-<endpoint>-pooler.<region>.aws.neon.tech/neondb?sslmode=require&channel_binding=require
+```
+
+The `PostgresClient` automatically strips `sslmode` and `channel_binding` (libpq-only params) and configures asyncpg with `ssl='require'` and `prepared_statement_cache_size=0` for Neon pooler (PgBouncer) compatibility.
+
+### Expected Tables After E2E
+
+| Table | Expected Rows | Description |
+|-------|--------------|-------------|
+| `action_items` (where `graph_action_item_id IS NOT NULL`) | ~30-45 | Pipeline-created action items (UPSERTed by `graph_action_item_id`) |
+| `action_item_topics` | ~15-20 | Topical groupings |
+| `action_item_topic_memberships` | ~30-45 | Action item ↔ topic links |
+| `action_item_owners` | ~3-8 | Canonical owner entries |
+
+Row counts are approximate — they vary with LLM non-determinism.
+
+### Neon MCP Verification Queries
+
+After running the live E2E, verify data via Neon MCP (project: `super-glitter-11265514`):
+
+```sql
+-- Count rows in each dual-write table
+SELECT 'action_items' as tbl, COUNT(*) as cnt
+FROM action_items WHERE graph_action_item_id IS NOT NULL
+UNION ALL SELECT 'action_item_topics', COUNT(*) FROM action_item_topics
+UNION ALL SELECT 'action_item_topic_memberships', COUNT(*) FROM action_item_topic_memberships
+UNION ALL SELECT 'action_item_owners', COUNT(*) FROM action_item_owners;
+
+-- Spot-check action item field mapping
+SELECT title, status, owner_name, owner_type, is_user_owned
+FROM action_items WHERE graph_action_item_id IS NOT NULL LIMIT 5;
+
+-- Verify topic linkage
+SELECT t.name, COUNT(m.action_item_id) as item_count
+FROM action_item_topics t
+JOIN action_item_topic_memberships m ON m.topic_id = t.id
+GROUP BY t.name ORDER BY item_count DESC;
+```
+
+### Failure Isolation Test
+
+To verify that a Postgres failure doesn't block Neo4j:
+
+1. Set `NEON_DATABASE_URL` to an invalid URL (e.g. `postgresql://bad:bad@localhost/bad`)
+2. Run `python scripts/run_live_e2e.py`
+3. Verify: Neo4j pipeline succeeds, Postgres is skipped with a warning
+4. All transcripts should show `Both OK = Yes`
+
+### Historical Results
+
+**2026-02-25** (first live Postgres dual-write):
+
+| Table | Count |
+|-------|-------|
+| `action_items` | 35 |
+| `action_item_topics` | 19 |
+| `action_item_topic_memberships` | 38 |
+| `action_item_owners` | 3 |
+
+Neo4j had 38 action items vs Postgres 35 — the difference is expected because Neo4j counts include items that were later updated (creating new version nodes), while Postgres UPSERTs update rows in place using `graph_action_item_id`.
+
+---
+
 ## Appendix: File Map
 
 ```
@@ -547,6 +622,9 @@ tests/
   test_deal_merger.py                # Merge synthesis + versions
   test_deal_repository.py            # Deal graph CRUD
   test_deal_neo4j_client.py          # Deal DB client + schema
+
+  # Postgres Dual-Write
+  test_postgres_client.py            # PostgresClient + Neon pooler compat
 
   # Infrastructure
   test_neo4j_client.py               # AI Neo4j client
