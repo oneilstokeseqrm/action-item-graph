@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     # OpenAI
     OPENAI_API_KEY: str
 
+    # Postgres (Neon) — dual-write projection
+    NEON_DATABASE_URL: str = ""
+
     # Auth
     WORKER_API_KEY: str
 
