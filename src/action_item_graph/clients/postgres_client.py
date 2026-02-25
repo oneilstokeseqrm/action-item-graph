@@ -1,5 +1,5 @@
 """
-Postgres (Neon) dual-write client for the Action Item Graph pipeline.
+Postgres (Neon) dual-write client for the Action Item Graph and Deal pipelines.
 
 Mirrors Neo4j writes to Postgres using SQLAlchemy 2.0 async engine + asyncpg.
 Neo4j remains the source of truth; Postgres is a read-optimized projection.
@@ -13,6 +13,9 @@ Tables written:
 - action_item_topic_memberships (INSERT ON CONFLICT DO NOTHING)
 - action_item_owners (UPSERT on owner_id)
 - action_item_links (INSERT ON CONFLICT DO NOTHING)
+- opportunities (UPSERT on graph_opportunity_id)
+- deal_versions (INSERT)
+- interaction_links (INSERT ON CONFLICT DO NOTHING)
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from ..models.action_item import ActionItem, ActionItemVersion
 from ..models.entities import Owner
 from ..models.topic import ActionItemTopic, ActionItemTopicVersion
+from deal_graph.models.deal import Deal, DealStage, DealVersion, OntologyScores
 
 logger = structlog.get_logger(__name__)
 
@@ -43,6 +47,13 @@ _STATUS_MAP = {
     'cancelled': 'cancelled',
     'deferred': 'deferred',
 }
+
+# Columns on opportunities table that fire notify_forecast_job() on UPDATE.
+# The Deal dual-write MUST NOT write to these columns.
+_DEAL_TRIGGER_PROTECTED_COLUMNS = frozenset({
+    'stage', 'amount', 'close_date', 'deal_status',
+    'forecast_category', 'next_step', 'description', 'lost_reason',
+})
 
 
 def _map_status(neo4j_status: str) -> str:
@@ -92,6 +103,31 @@ def _embedding_to_pgvector(embedding: list[float] | None) -> str | None:
     if embedding is None:
         return None
     return '[' + ','.join(str(f) for f in embedding) + ']'
+
+
+def _ontology_to_jsonb(scores: OntologyScores) -> str | None:
+    """Serialize OntologyScores to JSONB string with evidence text."""
+    if not scores.scores:
+        return None
+    result = {}
+    for dim_id, score in scores.scores.items():
+        result[dim_id] = {
+            'score': score,
+            'confidence': scores.confidences.get(dim_id, 0.0),
+            'evidence': scores.evidence.get(dim_id),
+        }
+    return json.dumps(result)
+
+
+def _ontology_dim_params(scores: OntologyScores) -> dict[str, int | float | None]:
+    """Flatten OntologyScores to individual dim_* column parameters."""
+    from deal_graph.pipeline.merger import TRANSCRIPT_EXTRACTED_DIMENSIONS
+
+    params: dict[str, int | float | None] = {}
+    for dim_id in TRANSCRIPT_EXTRACTED_DIMENSIONS:
+        params[f'dim_{dim_id}'] = scores.scores.get(dim_id)
+        params[f'dim_{dim_id}_confidence'] = scores.confidences.get(dim_id)
+    return params
 
 
 class PostgresClient:
@@ -643,4 +679,290 @@ class PostgresClient:
                 logger.exception(
                     'postgres_client.link_interaction_failed',
                     action_item_id=str(item.id),
+                )
+
+    # =========================================================================
+    # Deal UPSERT
+    # =========================================================================
+
+    async def upsert_deal(
+        self,
+        deal: Deal,
+        source_user_id: str | None = None,
+    ) -> None:
+        """Upsert a Deal into the opportunities table.
+
+        Conflict resolution on graph_opportunity_id (unique index).
+        Does NOT write to trigger-protected columns (stage, amount, etc.).
+        """
+        dim_params = _ontology_dim_params(deal.ontology_scores)
+
+        dim_col_names = sorted(dim_params.keys())
+        dim_insert_cols = ', '.join(f'"{c}"' for c in dim_col_names)
+        dim_insert_vals = ', '.join(f':{c}' for c in dim_col_names)
+        dim_update_set = ', '.join(f'"{c}" = :{c}' for c in dim_col_names)
+
+        sql = f"""
+        INSERT INTO opportunities (
+            graph_opportunity_id, tenant_id, account_id, opportunity_name, deal_ref,
+            currency, actual_close_date,
+            latest_ai_summary, ai_evolution_summary,
+            meddic_metrics, meddic_metrics_confidence,
+            meddic_economic_buyer, meddic_economic_buyer_confidence,
+            meddic_decision_criteria, meddic_decision_criteria_confidence,
+            meddic_decision_process, meddic_decision_process_confidence,
+            meddic_identified_pain, meddic_identified_pain_confidence,
+            meddic_champion, meddic_champion_confidence,
+            meddic_completeness, meddic_paper_process, meddic_competition,
+            {dim_insert_cols},
+            ontology_scores_json, ontology_completeness, ontology_version,
+            extraction_embedding, extraction_embedding_current,
+            extraction_confidence, extraction_version, source_interaction_id,
+            qualification_status, source_user_id,
+            ai_workflow_metadata
+        ) VALUES (
+            :graph_opportunity_id, :tenant_id, :account_id, :opportunity_name, :deal_ref,
+            :currency, :actual_close_date,
+            :latest_ai_summary, :ai_evolution_summary,
+            :meddic_metrics, :meddic_metrics_confidence,
+            :meddic_economic_buyer, :meddic_economic_buyer_confidence,
+            :meddic_decision_criteria, :meddic_decision_criteria_confidence,
+            :meddic_decision_process, :meddic_decision_process_confidence,
+            :meddic_identified_pain, :meddic_identified_pain_confidence,
+            :meddic_champion, :meddic_champion_confidence,
+            :meddic_completeness, :meddic_paper_process, :meddic_competition,
+            {dim_insert_vals},
+            :ontology_scores_json, :ontology_completeness, :ontology_version,
+            :extraction_embedding, :extraction_embedding_current,
+            :extraction_confidence, :extraction_version, :source_interaction_id,
+            :qualification_status, :source_user_id,
+            :ai_workflow_metadata
+        )
+        ON CONFLICT (graph_opportunity_id) DO UPDATE SET
+            deal_ref = :deal_ref,
+            latest_ai_summary = :latest_ai_summary,
+            ai_evolution_summary = :ai_evolution_summary,
+            meddic_metrics = :meddic_metrics,
+            meddic_metrics_confidence = :meddic_metrics_confidence,
+            meddic_economic_buyer = :meddic_economic_buyer,
+            meddic_economic_buyer_confidence = :meddic_economic_buyer_confidence,
+            meddic_decision_criteria = :meddic_decision_criteria,
+            meddic_decision_criteria_confidence = :meddic_decision_criteria_confidence,
+            meddic_decision_process = :meddic_decision_process,
+            meddic_decision_process_confidence = :meddic_decision_process_confidence,
+            meddic_identified_pain = :meddic_identified_pain,
+            meddic_identified_pain_confidence = :meddic_identified_pain_confidence,
+            meddic_champion = :meddic_champion,
+            meddic_champion_confidence = :meddic_champion_confidence,
+            meddic_completeness = :meddic_completeness,
+            meddic_paper_process = :meddic_paper_process,
+            meddic_competition = :meddic_competition,
+            {dim_update_set},
+            ontology_scores_json = :ontology_scores_json,
+            ontology_completeness = :ontology_completeness,
+            ontology_version = :ontology_version,
+            extraction_embedding = :extraction_embedding,
+            extraction_embedding_current = :extraction_embedding_current,
+            extraction_confidence = :extraction_confidence,
+            extraction_version = :extraction_version,
+            source_interaction_id = :source_interaction_id,
+            qualification_status = :qualification_status,
+            source_user_id = :source_user_id,
+            ai_workflow_metadata = :ai_workflow_metadata,
+            updated_at = now()
+        """
+
+        params = {
+            'graph_opportunity_id': _to_pg_uuid(deal.opportunity_id),
+            'tenant_id': _to_pg_uuid(deal.tenant_id),
+            'account_id': _to_pg_uuid(deal.account_id) if deal.account_id else None,
+            'opportunity_name': deal.name or None,
+            'currency': deal.currency or 'USD',
+            'actual_close_date': deal.closed_at,
+            'deal_ref': deal.deal_ref,
+            'latest_ai_summary': deal.opportunity_summary or None,
+            'ai_evolution_summary': deal.evolution_summary or None,
+            # MEDDIC
+            'meddic_metrics': deal.meddic.metrics,
+            'meddic_metrics_confidence': deal.meddic.metrics_confidence,
+            'meddic_economic_buyer': deal.meddic.economic_buyer,
+            'meddic_economic_buyer_confidence': deal.meddic.economic_buyer_confidence,
+            'meddic_decision_criteria': deal.meddic.decision_criteria,
+            'meddic_decision_criteria_confidence': deal.meddic.decision_criteria_confidence,
+            'meddic_decision_process': deal.meddic.decision_process,
+            'meddic_decision_process_confidence': deal.meddic.decision_process_confidence,
+            'meddic_identified_pain': deal.meddic.identified_pain,
+            'meddic_identified_pain_confidence': deal.meddic.identified_pain_confidence,
+            'meddic_champion': deal.meddic.champion,
+            'meddic_champion_confidence': deal.meddic.champion_confidence,
+            'meddic_completeness': deal.meddic.completeness_score,
+            'meddic_paper_process': deal.meddic.paper_process,
+            'meddic_competition': deal.meddic.competition,
+            # Ontology
+            'ontology_scores_json': _ontology_to_jsonb(deal.ontology_scores),
+            'ontology_completeness': deal.ontology_scores.completeness_score,
+            'ontology_version': deal.ontology_version,
+            # Embeddings
+            'extraction_embedding': _embedding_to_pgvector(deal.embedding),
+            'extraction_embedding_current': _embedding_to_pgvector(deal.embedding_current),
+            # Extraction metadata
+            'extraction_confidence': deal.confidence,
+            'extraction_version': deal.version,
+            'source_interaction_id': _to_pg_uuid(deal.source_interaction_id),
+            # Future slots
+            'qualification_status': deal.qualification_status,
+            'source_user_id': source_user_id,
+            # Workflow metadata
+            'ai_workflow_metadata': json.dumps({
+                'source': 'deal_graph',
+                'deal_name': deal.name,
+                'stage_assessment': deal.stage.value if isinstance(deal.stage, DealStage) else deal.stage,
+                'amount_estimate': deal.amount,
+                'currency': deal.currency,
+                'deal_ref': deal.deal_ref,
+                'expected_close_date': deal.expected_close_date.isoformat() if deal.expected_close_date else None,
+                'closed_at': deal.closed_at.isoformat() if deal.closed_at else None,
+            }),
+            # Dim columns
+            **dim_params,
+        }
+
+        async with self.engine.begin() as conn:
+            await conn.execute(text(sql), params)
+
+        logger.info(
+            'postgres_client.upsert_deal',
+            opportunity_id=str(deal.opportunity_id),
+            tenant_id=str(deal.tenant_id),
+        )
+
+    # =========================================================================
+    # Deal Version INSERT
+    # =========================================================================
+
+    async def insert_deal_version(self, version: DealVersion) -> None:
+        """Insert a DealVersion snapshot into deal_versions table."""
+        sql = """
+        INSERT INTO deal_versions (
+            id, tenant_id, opportunity_id, version_number,
+            name, stage, amount,
+            opportunity_summary, evolution_summary,
+            meddic_metrics, meddic_economic_buyer, meddic_decision_criteria,
+            meddic_decision_process, meddic_identified_pain, meddic_champion,
+            meddic_completeness,
+            ontology_scores_json, ontology_completeness, ontology_version,
+            change_summary, changed_fields, change_source_interaction_id,
+            created_at, valid_from, valid_until
+        ) VALUES (
+            :id, :tenant_id, :opportunity_id, :version_number,
+            :name, :stage, :amount,
+            :opportunity_summary, :evolution_summary,
+            :meddic_metrics, :meddic_economic_buyer, :meddic_decision_criteria,
+            :meddic_decision_process, :meddic_identified_pain, :meddic_champion,
+            :meddic_completeness,
+            :ontology_scores_json, :ontology_completeness, :ontology_version,
+            :change_summary, :changed_fields, :change_source_interaction_id,
+            :created_at, :valid_from, :valid_until
+        )
+        ON CONFLICT (tenant_id, opportunity_id, version_number) DO NOTHING
+        """
+
+        params = {
+            'id': _to_pg_uuid(version.version_id),
+            'tenant_id': _to_pg_uuid(version.tenant_id),
+            'opportunity_id': _to_pg_uuid(version.deal_opportunity_id),
+            'version_number': version.version,
+            'name': version.name,
+            'stage': version.stage.value if isinstance(version.stage, DealStage) else version.stage,
+            'amount': version.amount,
+            'opportunity_summary': version.opportunity_summary,
+            'evolution_summary': version.evolution_summary,
+            'meddic_metrics': version.meddic_metrics,
+            'meddic_economic_buyer': version.meddic_economic_buyer,
+            'meddic_decision_criteria': version.meddic_decision_criteria,
+            'meddic_decision_process': version.meddic_decision_process,
+            'meddic_identified_pain': version.meddic_identified_pain,
+            'meddic_champion': version.meddic_champion,
+            'meddic_completeness': version.meddic_completeness,
+            'ontology_scores_json': version.ontology_scores_json,
+            'ontology_completeness': version.ontology_completeness,
+            'ontology_version': version.ontology_version,
+            'change_summary': version.change_summary,
+            'changed_fields': json.dumps(version.changed_fields),
+            'change_source_interaction_id': _to_pg_uuid(version.change_source_interaction_id),
+            'created_at': _to_pg_ts(version.created_at),
+            'valid_from': _to_pg_ts(version.valid_from),
+            'valid_until': _to_pg_ts(version.valid_until),
+        }
+
+        async with self.engine.begin() as conn:
+            await conn.execute(text(sql), params)
+
+        logger.info(
+            'postgres_client.insert_deal_version',
+            version_id=str(version.version_id),
+            opportunity_id=str(version.deal_opportunity_id),
+        )
+
+    # =========================================================================
+    # Deal Entity Links
+    # =========================================================================
+
+    async def link_deal_to_interaction(
+        self,
+        tenant_id: UUID,
+        interaction_id: UUID,
+        opportunity_id: UUID,
+    ) -> None:
+        """Link an interaction to an opportunity via interaction_links table."""
+        sql = """
+        INSERT INTO interaction_links (tenant_id, interaction_id, entity_type, entity_id)
+        VALUES (:tenant_id, :interaction_id, 'opportunity', :entity_id)
+        ON CONFLICT DO NOTHING
+        """
+        async with self.engine.begin() as conn:
+            await conn.execute(text(sql), {
+                'tenant_id': _to_pg_uuid(tenant_id),
+                'interaction_id': _to_pg_uuid(interaction_id),
+                'entity_id': _to_pg_uuid(opportunity_id),
+            })
+
+    # =========================================================================
+    # Deal Batch / Convenience
+    # =========================================================================
+
+    async def persist_deal_full(
+        self,
+        deal: Deal,
+        version: DealVersion | None = None,
+        interaction_id: UUID | None = None,
+        source_user_id: str | None = None,
+    ) -> None:
+        """Write a Deal + optional DealVersion to Postgres with failure isolation."""
+        if source_user_id is not None:
+            await self.upsert_deal(deal, source_user_id=source_user_id)
+        else:
+            await self.upsert_deal(deal)
+
+        if version is not None:
+            try:
+                await self.insert_deal_version(version)
+            except Exception:
+                logger.exception(
+                    'postgres_client.persist_deal_version_failed',
+                    opportunity_id=str(deal.opportunity_id),
+                )
+
+        if interaction_id is not None:
+            try:
+                await self.link_deal_to_interaction(
+                    tenant_id=deal.tenant_id,
+                    interaction_id=interaction_id,
+                    opportunity_id=deal.opportunity_id,
+                )
+            except Exception:
+                logger.exception(
+                    'postgres_client.link_deal_interaction_failed',
+                    opportunity_id=str(deal.opportunity_id),
+                    interaction_id=str(interaction_id),
                 )
