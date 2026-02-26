@@ -689,11 +689,14 @@ class PostgresClient:
         self,
         deal: Deal,
         source_user_id: str | None = None,
-    ) -> None:
+    ) -> UUID:
         """Upsert a Deal into the opportunities table.
 
         Conflict resolution on graph_opportunity_id (unique index).
         Does NOT write to trigger-protected columns (stage, amount, etc.).
+
+        Returns:
+            The Postgres-side ``opportunities.id`` (PK) for FK references.
         """
         dim_params = _ontology_dim_params(deal.ontology_scores)
 
@@ -770,6 +773,7 @@ class PostgresClient:
             source_user_id = :source_user_id,
             ai_workflow_metadata = :ai_workflow_metadata,
             updated_at = now()
+        RETURNING id
         """
 
         params = {
@@ -828,20 +832,34 @@ class PostgresClient:
         }
 
         async with self.engine.begin() as conn:
-            await conn.execute(text(sql), params)
+            result = await conn.execute(text(sql), params)
+            row = result.fetchone()
+            pg_id: UUID = row[0]  # type: ignore[index]
 
         logger.info(
             'postgres_client.upsert_deal',
             opportunity_id=str(deal.opportunity_id),
             tenant_id=str(deal.tenant_id),
+            pg_id=str(pg_id),
         )
+        return pg_id
 
     # =========================================================================
     # Deal Version INSERT
     # =========================================================================
 
-    async def insert_deal_version(self, version: DealVersion) -> None:
-        """Insert a DealVersion snapshot into deal_versions table."""
+    async def insert_deal_version(
+        self,
+        version: DealVersion,
+        pg_opportunity_id: UUID | None = None,
+    ) -> None:
+        """Insert a DealVersion snapshot into deal_versions table.
+
+        Args:
+            version: DealVersion model
+            pg_opportunity_id: Postgres-side opportunities.id (PK) for the FK.
+                If None, falls back to version.deal_opportunity_id (graph ID).
+        """
         sql = """
         INSERT INTO deal_versions (
             id, tenant_id, opportunity_id, version_number,
@@ -870,7 +888,7 @@ class PostgresClient:
         params = {
             'id': _to_pg_uuid(version.version_id),
             'tenant_id': _to_pg_uuid(version.tenant_id),
-            'opportunity_id': _to_pg_uuid(version.deal_opportunity_id),
+            'opportunity_id': _to_pg_uuid(pg_opportunity_id) if pg_opportunity_id else _to_pg_uuid(version.deal_opportunity_id),
             'version_number': version.version,
             'name': version.name,
             'stage': version.stage.value if isinstance(version.stage, DealStage) else version.stage,
@@ -940,13 +958,13 @@ class PostgresClient:
     ) -> None:
         """Write a Deal + optional DealVersion to Postgres with failure isolation."""
         if source_user_id is not None:
-            await self.upsert_deal(deal, source_user_id=source_user_id)
+            pg_id = await self.upsert_deal(deal, source_user_id=source_user_id)
         else:
-            await self.upsert_deal(deal)
+            pg_id = await self.upsert_deal(deal)
 
         if version is not None:
             try:
-                await self.insert_deal_version(version)
+                await self.insert_deal_version(version, pg_opportunity_id=pg_id)
             except Exception:
                 logger.exception(
                     'postgres_client.persist_deal_version_failed',

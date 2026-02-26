@@ -5,8 +5,7 @@ Deal-specific UPSERT/INSERT operations on opportunities + deal_versions.
 """
 
 import json
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -84,6 +83,21 @@ def sample_deal_version():
 # ---------------------------------------------------------------------------
 
 
+def _mock_upsert_engine():
+    """Create a mock engine whose conn.execute returns a RETURNING result with a UUID."""
+    fake_pg_id = UUID('99999999-9999-9999-9999-999999999999')
+    mock_engine = AsyncMock()
+    mock_conn = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.fetchone.return_value = (fake_pg_id,)
+    mock_conn.execute.return_value = mock_result
+    ctx = AsyncMock()
+    ctx.__aenter__ = AsyncMock(return_value=mock_conn)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    mock_engine.begin = MagicMock(return_value=ctx)
+    return mock_engine, mock_conn, fake_pg_id
+
+
 class TestUpsertDeal:
     """Tests for PostgresClient.upsert_deal()."""
 
@@ -93,12 +107,7 @@ class TestUpsertDeal:
         from action_item_graph.clients.postgres_client import PostgresClient
 
         client = PostgresClient('postgresql+asyncpg://test')
-        mock_engine = AsyncMock()
-        mock_conn = AsyncMock()
-        ctx = AsyncMock()
-        ctx.__aenter__ = AsyncMock(return_value=mock_conn)
-        ctx.__aexit__ = AsyncMock(return_value=False)
-        mock_engine.begin = MagicMock(return_value=ctx)
+        mock_engine, mock_conn, _ = _mock_upsert_engine()
         client._engine = mock_engine
 
         await client.upsert_deal(sample_deal)
@@ -116,12 +125,7 @@ class TestUpsertDeal:
         from action_item_graph.clients.postgres_client import PostgresClient
 
         client = PostgresClient('postgresql+asyncpg://test')
-        mock_engine = AsyncMock()
-        mock_conn = AsyncMock()
-        ctx = AsyncMock()
-        ctx.__aenter__ = AsyncMock(return_value=mock_conn)
-        ctx.__aexit__ = AsyncMock(return_value=False)
-        mock_engine.begin = MagicMock(return_value=ctx)
+        mock_engine, mock_conn, _ = _mock_upsert_engine()
         client._engine = mock_engine
 
         await client.upsert_deal(sample_deal)
@@ -139,12 +143,7 @@ class TestUpsertDeal:
         from action_item_graph.clients.postgres_client import PostgresClient
 
         client = PostgresClient('postgresql+asyncpg://test')
-        mock_engine = AsyncMock()
-        mock_conn = AsyncMock()
-        ctx = AsyncMock()
-        ctx.__aenter__ = AsyncMock(return_value=mock_conn)
-        ctx.__aexit__ = AsyncMock(return_value=False)
-        mock_engine.begin = MagicMock(return_value=ctx)
+        mock_engine, mock_conn, _ = _mock_upsert_engine()
         client._engine = mock_engine
 
         await client.upsert_deal(sample_deal)
@@ -166,12 +165,7 @@ class TestUpsertDeal:
         from action_item_graph.clients.postgres_client import PostgresClient
 
         client = PostgresClient('postgresql+asyncpg://test')
-        mock_engine = AsyncMock()
-        mock_conn = AsyncMock()
-        ctx = AsyncMock()
-        ctx.__aenter__ = AsyncMock(return_value=mock_conn)
-        ctx.__aexit__ = AsyncMock(return_value=False)
-        mock_engine.begin = MagicMock(return_value=ctx)
+        mock_engine, mock_conn, _ = _mock_upsert_engine()
         client._engine = mock_engine
 
         await client.upsert_deal(sample_deal)
@@ -187,12 +181,7 @@ class TestUpsertDeal:
         from action_item_graph.clients.postgres_client import PostgresClient
 
         client = PostgresClient('postgresql+asyncpg://test')
-        mock_engine = AsyncMock()
-        mock_conn = AsyncMock()
-        ctx = AsyncMock()
-        ctx.__aenter__ = AsyncMock(return_value=mock_conn)
-        ctx.__aexit__ = AsyncMock(return_value=False)
-        mock_engine.begin = MagicMock(return_value=ctx)
+        mock_engine, mock_conn, _ = _mock_upsert_engine()
         client._engine = mock_engine
 
         await client.upsert_deal(sample_deal)
@@ -208,12 +197,7 @@ class TestUpsertDeal:
         from action_item_graph.clients.postgres_client import PostgresClient
 
         client = PostgresClient('postgresql+asyncpg://test')
-        mock_engine = AsyncMock()
-        mock_conn = AsyncMock()
-        ctx = AsyncMock()
-        ctx.__aenter__ = AsyncMock(return_value=mock_conn)
-        ctx.__aexit__ = AsyncMock(return_value=False)
-        mock_engine.begin = MagicMock(return_value=ctx)
+        mock_engine, mock_conn, _ = _mock_upsert_engine()
         client._engine = mock_engine
 
         await client.upsert_deal(sample_deal)
@@ -243,12 +227,7 @@ class TestInsertDealVersion:
         from action_item_graph.clients.postgres_client import PostgresClient
 
         client = PostgresClient('postgresql+asyncpg://test')
-        mock_engine = AsyncMock()
-        mock_conn = AsyncMock()
-        ctx = AsyncMock()
-        ctx.__aenter__ = AsyncMock(return_value=mock_conn)
-        ctx.__aexit__ = AsyncMock(return_value=False)
-        mock_engine.begin = MagicMock(return_value=ctx)
+        mock_engine, mock_conn, _ = _mock_upsert_engine()
         client._engine = mock_engine
 
         await client.insert_deal_version(sample_deal_version)
@@ -266,12 +245,7 @@ class TestInsertDealVersion:
         from action_item_graph.clients.postgres_client import PostgresClient
 
         client = PostgresClient('postgresql+asyncpg://test')
-        mock_engine = AsyncMock()
-        mock_conn = AsyncMock()
-        ctx = AsyncMock()
-        ctx.__aenter__ = AsyncMock(return_value=mock_conn)
-        ctx.__aexit__ = AsyncMock(return_value=False)
-        mock_engine.begin = MagicMock(return_value=ctx)
+        mock_engine, mock_conn, _ = _mock_upsert_engine()
         client._engine = mock_engine
 
         await client.insert_deal_version(sample_deal_version)
@@ -296,9 +270,10 @@ class TestPersistDealFull:
         """Should call upsert_deal, insert_deal_version, and link_deal_to_interaction."""
         from action_item_graph.clients.postgres_client import PostgresClient
 
+        fake_pg_id = UUID('99999999-9999-9999-9999-999999999999')
         interaction_id = uuid4()
         client = PostgresClient('postgresql+asyncpg://test')
-        client.upsert_deal = AsyncMock()
+        client.upsert_deal = AsyncMock(return_value=fake_pg_id)
         client.insert_deal_version = AsyncMock()
         client.link_deal_to_interaction = AsyncMock()
 
@@ -307,7 +282,9 @@ class TestPersistDealFull:
         )
 
         client.upsert_deal.assert_called_once_with(sample_deal)
-        client.insert_deal_version.assert_called_once_with(sample_deal_version)
+        client.insert_deal_version.assert_called_once_with(
+            sample_deal_version, pg_opportunity_id=fake_pg_id,
+        )
         client.link_deal_to_interaction.assert_called_once()
 
     @pytest.mark.asyncio
@@ -315,8 +292,9 @@ class TestPersistDealFull:
         """Version insert failure should not prevent deal upsert (failure isolation)."""
         from action_item_graph.clients.postgres_client import PostgresClient
 
+        fake_pg_id = UUID('99999999-9999-9999-9999-999999999999')
         client = PostgresClient('postgresql+asyncpg://test')
-        client.upsert_deal = AsyncMock()
+        client.upsert_deal = AsyncMock(return_value=fake_pg_id)
         client.insert_deal_version = AsyncMock(side_effect=Exception('version write failed'))
         client.link_deal_to_interaction = AsyncMock()
 
@@ -331,9 +309,10 @@ class TestPersistDealFull:
         """Interaction link failure should not block deal upsert (failure isolation)."""
         from action_item_graph.clients.postgres_client import PostgresClient
 
+        fake_pg_id = UUID('99999999-9999-9999-9999-999999999999')
         interaction_id = uuid4()
         client = PostgresClient('postgresql+asyncpg://test')
-        client.upsert_deal = AsyncMock()
+        client.upsert_deal = AsyncMock(return_value=fake_pg_id)
         client.insert_deal_version = AsyncMock()
         client.link_deal_to_interaction = AsyncMock(side_effect=Exception('link failed'))
 
@@ -350,8 +329,9 @@ class TestPersistDealFull:
         """When version and interaction_id are None, only upsert_deal should be called."""
         from action_item_graph.clients.postgres_client import PostgresClient
 
+        fake_pg_id = UUID('99999999-9999-9999-9999-999999999999')
         client = PostgresClient('postgresql+asyncpg://test')
-        client.upsert_deal = AsyncMock()
+        client.upsert_deal = AsyncMock(return_value=fake_pg_id)
         client.insert_deal_version = AsyncMock()
         client.link_deal_to_interaction = AsyncMock()
 
