@@ -454,3 +454,33 @@ class DealRepository:
             },
         )
         return [r['version'] for r in result]
+
+    async def get_latest_version(
+        self,
+        tenant_id: UUID,
+        opportunity_id: str,
+    ) -> dict[str, Any] | None:
+        """Get the most recent DealVersion for a Deal.
+
+        Args:
+            tenant_id: Tenant UUID
+            opportunity_id: Deal identifier
+
+        Returns:
+            DealVersion properties dict, or None if no versions exist
+        """
+        query = """
+            MATCH (d:Deal {tenant_id: $tenant_id, opportunity_id: $opportunity_id})
+                  -[:HAS_VERSION]->(v:DealVersion)
+            RETURN v {.*} as version
+            ORDER BY v.version DESC
+            LIMIT 1
+        """
+        result = await self.neo4j.execute_query(
+            query,
+            {
+                'tenant_id': str(tenant_id),
+                'opportunity_id': opportunity_id,
+            },
+        )
+        return result[0]['version'] if result else None
