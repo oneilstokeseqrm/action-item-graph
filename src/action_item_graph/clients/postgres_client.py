@@ -704,7 +704,7 @@ class PostgresClient:
 
         sql = f"""
         INSERT INTO opportunities (
-            graph_opportunity_id, tenant_id, account_id, opportunity_name, deal_ref,
+            id, graph_opportunity_id, tenant_id, account_id, opportunity_name, deal_ref,
             currency, actual_close_date,
             latest_ai_summary, ai_evolution_summary,
             meddic_metrics, meddic_metrics_confidence,
@@ -721,7 +721,7 @@ class PostgresClient:
             qualification_status, source_user_id,
             ai_workflow_metadata
         ) VALUES (
-            :graph_opportunity_id, :tenant_id, :account_id, :opportunity_name, :deal_ref,
+            gen_random_uuid(), :graph_opportunity_id, :tenant_id, :account_id, :opportunity_name, :deal_ref,
             :currency, :actual_close_date,
             :latest_ai_summary, :ai_evolution_summary,
             :meddic_metrics, :meddic_metrics_confidence,
