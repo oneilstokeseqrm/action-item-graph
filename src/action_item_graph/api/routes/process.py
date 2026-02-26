@@ -48,6 +48,7 @@ async def process_envelope(
         deal_pipeline = DealPipeline(
             neo4j_client=request.app.state.deal_neo4j,
             openai_client=request.app.state.openai,
+            postgres_client=getattr(request.app.state, 'postgres', None),
         )
         dispatcher = EnvelopeDispatcher(
             action_item_pipeline=action_item_pipeline,

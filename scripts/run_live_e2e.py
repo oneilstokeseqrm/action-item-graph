@@ -922,7 +922,7 @@ async def main():
         ai_pipeline = ActionItemPipeline(
             openai, ai_neo4j, enable_topics=True, postgres_client=postgres,
         )
-        deal_pipeline = DealPipeline(deal_neo4j, openai)
+        deal_pipeline = DealPipeline(deal_neo4j, openai, postgres_client=postgres)
         dispatcher = EnvelopeDispatcher(ai_pipeline, deal_pipeline)
 
         # Process each transcript in sequence order
@@ -975,6 +975,38 @@ async def main():
                     print(f"\n  [PASS] Action item count matches: Neo4j={neo4j_ai_count}, Postgres={pg_ai_count}")
                 else:
                     print(f"\n  [WARN] Count mismatch: Neo4j={neo4j_ai_count}, Postgres={pg_ai_count}")
+
+            # --- Deal dual-write verification ---
+            from sqlalchemy import text
+            async with postgres.engine.begin() as conn:
+                # Count deals with graph cross-reference
+                result = await conn.execute(text(
+                    "SELECT COUNT(*) FROM opportunities WHERE graph_opportunity_id IS NOT NULL"
+                ))
+                pg_deal_count = result.scalar()
+
+                # Count deal versions
+                result = await conn.execute(text(
+                    "SELECT COUNT(*) FROM deal_versions"
+                ))
+                pg_version_count = result.scalar()
+
+            print(f"\n--- Postgres Deal Verification ---")
+            print(f"Opportunities with graph_opportunity_id: {pg_deal_count}")
+            print(f"Deal versions: {pg_version_count}")
+
+            # Compare Neo4j vs Postgres deal counts
+            neo4j_deal_count = len(deal_state['deals'])
+            if pg_deal_count == neo4j_deal_count:
+                print(f"  [PASS] Deal count matches: Neo4j={neo4j_deal_count}, Postgres={pg_deal_count}")
+            else:
+                print(f"  [WARN] Deal count mismatch: Neo4j={neo4j_deal_count}, Postgres={pg_deal_count}")
+
+            neo4j_version_count = deal_state['deal_version_count']
+            if pg_version_count == neo4j_version_count:
+                print(f"  [PASS] Deal version count matches: Neo4j={neo4j_version_count}, Postgres={pg_version_count}")
+            else:
+                print(f"  [WARN] Deal version count mismatch: Neo4j={neo4j_version_count}, Postgres={pg_version_count}")
 
         # Print comprehensive summary
         print_summary_report(all_results, ai_state, deal_state, data, total_time_ms)

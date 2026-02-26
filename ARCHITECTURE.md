@@ -222,6 +222,31 @@ Key field name differences between Neo4j and Postgres:
 
 All tables have RLS policies (`tenant_id` isolation) and appropriate indexes.
 
+### Postgres Dual-Write (Phase B: Deals)
+
+The DealPipeline performs the same dual-write pattern: after Neo4j persistence, extracted deal data is written to the eq-frontend Neon Postgres database. The same failure-isolation guarantees apply — Postgres failures never block Neo4j writes.
+
+#### What Gets Written
+
+| Neo4j Entity | Postgres Table | Operation |
+|-------------|---------------|-----------|
+| Deal | `opportunities` (AI extraction columns) | UPSERT (keyed on `graph_opportunity_id`) |
+| DealVersion | `deal_versions` | INSERT |
+| Deal-Interaction link | `opportunity_interaction_links` | UPSERT |
+
+#### Column Strategy
+
+The Deal pipeline writes only to AI extraction columns on the `opportunities` table. It does **not** write to the 8 trigger-protected columns owned by the opportunity-forecasting pipeline (`stage`, `amount`, `close_date`, `probability`, `forecast_category`, `pipeline_category`, `is_won`, `is_closed`).
+
+Ontology storage uses the **Option C+** pattern: individual `dim_*` columns for each ontology dimension, a JSONB `ontology_scores_json` column for programmatic access, and a scalar `ontology_completeness` field for fast filtering. MEDDIC fields follow the same pattern with `meddic_*` columns and `meddic_completeness`.
+
+#### Failure Isolation
+
+Same three-level isolation as Action Items:
+1. **Per-entity**: Each deal upsert, version insert, and interaction link is individually caught
+2. **Per-phase**: `persist_deal_full()` catches the full deal write
+3. **Top-level**: `_dual_write_postgres()` catches any remaining exceptions
+
 ---
 
 ## Event Consumer Architecture

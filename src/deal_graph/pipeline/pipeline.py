@@ -21,10 +21,12 @@ from uuid import UUID
 import structlog
 
 from action_item_graph.clients.openai_client import OpenAIClient
+from action_item_graph.clients.postgres_client import PostgresClient
 from action_item_graph.models.envelope import EnvelopeV1
 
 from ..clients.neo4j_client import DealNeo4jClient
 from ..errors import DealExtractionError, DealPipelineError
+from ..models.deal import Deal, DealVersion
 from ..repository import DealRepository
 from .extractor import DealExtractor
 from .matcher import DealMatcher
@@ -84,6 +86,98 @@ class DealPipelineResult:
 
 
 # =============================================================================
+# Neo4j → Model Helpers
+# =============================================================================
+
+
+def _neo4j_node_to_deal(node: dict[str, Any]) -> Deal:
+    """Convert a Neo4j Deal node dict to a Deal model instance."""
+    from ..models.deal import MEDDICProfile, OntologyScores
+    from .merger import TRANSCRIPT_EXTRACTED_DIMENSIONS
+
+    meddic = MEDDICProfile(
+        metrics=node.get('meddic_metrics'),
+        metrics_confidence=node.get('meddic_metrics_confidence', 0.0),
+        economic_buyer=node.get('meddic_economic_buyer'),
+        economic_buyer_confidence=node.get('meddic_economic_buyer_confidence', 0.0),
+        decision_criteria=node.get('meddic_decision_criteria'),
+        decision_criteria_confidence=node.get('meddic_decision_criteria_confidence', 0.0),
+        decision_process=node.get('meddic_decision_process'),
+        decision_process_confidence=node.get('meddic_decision_process_confidence', 0.0),
+        identified_pain=node.get('meddic_identified_pain'),
+        identified_pain_confidence=node.get('meddic_identified_pain_confidence', 0.0),
+        champion=node.get('meddic_champion'),
+        champion_confidence=node.get('meddic_champion_confidence', 0.0),
+        paper_process=node.get('meddic_paper_process'),
+        competition=node.get('meddic_competition'),
+    )
+
+    scores = {}
+    confidences = {}
+    for dim_id in TRANSCRIPT_EXTRACTED_DIMENSIONS:
+        score = node.get(f'dim_{dim_id}')
+        if score is not None:
+            scores[dim_id] = score
+        conf = node.get(f'dim_{dim_id}_confidence')
+        if conf is not None:
+            confidences[dim_id] = conf
+
+    ontology = OntologyScores(scores=scores, confidences=confidences)
+
+    return Deal(
+        tenant_id=UUID(node['tenant_id']),
+        opportunity_id=UUID(node['opportunity_id']),
+        deal_ref=node.get('deal_ref'),
+        name=node.get('name', ''),
+        stage=node.get('stage', 'prospecting'),
+        amount=node.get('amount'),
+        account_id=node.get('account_id'),
+        currency=node.get('currency', 'USD'),
+        meddic=meddic,
+        ontology_scores=ontology,
+        ontology_version=node.get('ontology_version'),
+        opportunity_summary=node.get('opportunity_summary', ''),
+        evolution_summary=node.get('evolution_summary', ''),
+        embedding=node.get('embedding'),
+        embedding_current=node.get('embedding_current'),
+        version=node.get('version', 1),
+        confidence=node.get('confidence', 1.0),
+        source_interaction_id=UUID(node['source_interaction_id']) if node.get('source_interaction_id') else None,
+    )
+
+
+def _neo4j_node_to_deal_version(node: dict[str, Any]) -> DealVersion:
+    """Convert a Neo4j DealVersion node dict to a DealVersion model instance."""
+    from ..models.deal import DealVersion as DV
+
+    return DV(
+        version_id=UUID(node['version_id']),
+        deal_opportunity_id=UUID(node['deal_opportunity_id']),
+        tenant_id=UUID(node['tenant_id']),
+        version=node.get('version', 1),
+        name=node.get('name', ''),
+        stage=node.get('stage', 'prospecting'),
+        amount=node.get('amount'),
+        opportunity_summary=node.get('opportunity_summary', ''),
+        evolution_summary=node.get('evolution_summary', ''),
+        meddic_metrics=node.get('meddic_metrics'),
+        meddic_economic_buyer=node.get('meddic_economic_buyer'),
+        meddic_decision_criteria=node.get('meddic_decision_criteria'),
+        meddic_decision_process=node.get('meddic_decision_process'),
+        meddic_identified_pain=node.get('meddic_identified_pain'),
+        meddic_champion=node.get('meddic_champion'),
+        meddic_completeness=node.get('meddic_completeness'),
+        change_summary=node.get('change_summary', ''),
+        changed_fields=node.get('changed_fields', []),
+        change_source_interaction_id=(
+            UUID(node['change_source_interaction_id'])
+            if node.get('change_source_interaction_id')
+            else None
+        ),
+    )
+
+
+# =============================================================================
 # DealPipeline
 # =============================================================================
 
@@ -104,6 +198,7 @@ class DealPipeline:
         self,
         neo4j_client: DealNeo4jClient,
         openai_client: OpenAIClient,
+        postgres_client: PostgresClient | None = None,
     ):
         """
         Initialize the pipeline with all required clients.
@@ -113,11 +208,13 @@ class DealPipeline:
         Args:
             neo4j_client: Connected DealNeo4jClient for graph operations
             openai_client: Connected OpenAI client for LLM calls + embeddings
+            postgres_client: Optional PostgresClient for dual-write projection
         """
         self.extractor = DealExtractor(openai_client)
         self.matcher = DealMatcher(neo4j_client, openai_client)
         self.merger = DealMerger(neo4j_client, openai_client)
         self.repository = DealRepository(neo4j_client)
+        self.postgres = postgres_client
 
     async def process_envelope(
         self,
@@ -319,6 +416,19 @@ class DealPipeline:
         )
 
         # ------------------------------------------------------------------
+        # Step 6b: Dual-write to Postgres (failure-isolated)
+        # ------------------------------------------------------------------
+        try:
+            await self._dual_write_postgres(
+                merge_results=result.merge_results,
+                tenant_id=tenant_id,
+                interaction_id=interaction_id,
+                source_user_id=getattr(envelope, 'user_id', None),
+            )
+        except Exception:
+            logger.exception('deal_pipeline.postgres_dual_write_failed')
+
+        # ------------------------------------------------------------------
         # Step 7: Finalize
         # ------------------------------------------------------------------
         result.completed_at = datetime.now(tz=timezone.utc)
@@ -366,3 +476,67 @@ class DealPipeline:
                 interaction_id=interaction_id,
                 error=str(exc),
             )
+
+    async def _dual_write_postgres(
+        self,
+        merge_results: list,
+        tenant_id: UUID,
+        interaction_id: str | None,
+        source_user_id: str | None = None,
+    ) -> None:
+        """Write Deals to Postgres after Neo4j merge completes.
+
+        Failure-isolated: any exception is logged and swallowed.
+        """
+        if self.postgres is None:
+            return
+
+        for merge_result in merge_results:
+            try:
+                deal_node = await self.repository.get_deal(
+                    tenant_id=tenant_id,
+                    opportunity_id=merge_result.opportunity_id,
+                )
+                if deal_node is None:
+                    logger.warning(
+                        'deal_pipeline.postgres_dual_write.deal_not_found',
+                        opportunity_id=merge_result.opportunity_id,
+                    )
+                    continue
+
+                deal = _neo4j_node_to_deal(deal_node)
+
+                version = None
+                if merge_result.version_created:
+                    version = await self._fetch_latest_version(
+                        tenant_id=deal.tenant_id,
+                        opportunity_id=merge_result.opportunity_id,
+                    )
+
+                await self.postgres.persist_deal_full(
+                    deal=deal,
+                    version=version,
+                    interaction_id=UUID(interaction_id) if interaction_id else None,
+                    source_user_id=source_user_id,
+                )
+            except Exception:
+                logger.exception(
+                    'deal_pipeline.postgres_dual_write.deal_failed',
+                    opportunity_id=merge_result.opportunity_id,
+                )
+
+    async def _fetch_latest_version(
+        self,
+        tenant_id: UUID,
+        opportunity_id: str,
+    ) -> DealVersion | None:
+        """Fetch the most recent DealVersion from Neo4j."""
+        if not hasattr(self.repository, 'get_latest_version'):
+            return None
+        version_node = await self.repository.get_latest_version(
+            tenant_id=tenant_id,
+            opportunity_id=opportunity_id,
+        )
+        if version_node is None:
+            return None
+        return _neo4j_node_to_deal_version(version_node)

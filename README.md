@@ -13,7 +13,7 @@ A temporal knowledge graph pipeline for extracting and managing action items fro
 - **Dual Embeddings**: Prevents embedding drift with immutable original + mutable current embeddings
 - **Deal Extraction Pipeline**: Concurrent deal detection using MEDDIC-structured extraction, vector matching with graduated thresholds, and LLM-synthesized merging
 - **Dual-Pipeline Dispatcher**: Routes each envelope to both Action Item and Deal pipelines concurrently with fault isolation
-- **Postgres Dual-Write**: Optional projection of action items, topics, and versions to Neon Postgres for frontend reads (Neo4j remains source of truth)
+- **Postgres Dual-Write**: Optional projection of action items, topics, versions, deals, and deal versions to Neon Postgres for frontend reads (Neo4j remains source of truth)
 
 ## Installation
 
@@ -233,6 +233,10 @@ nodes via defensive MERGE:
 - **`DealNeo4jClient`** manages Deal pipeline labels (UNIQUENESS constraints, 2 vector indexes)
 - Both converge on shared Account/Interaction nodes via `MERGE ... ON CREATE SET ... ON MATCH SET`
 - Both pipelines run concurrently via `EnvelopeDispatcher` with fault isolation
+- Both pipelines optionally dual-write to Neon Postgres when `NEON_DATABASE_URL` is set:
+  - Action Items: `action_items`, `action_item_versions`, `action_item_topics`, `action_item_topic_memberships`, `action_item_owners`
+  - Deals: `opportunities` table (AI extraction columns: MEDDIC, ontology dimensions, embeddings) + `deal_versions` table (bi-temporal snapshots)
+  - Deal writes are coordinated with the opportunity-forecasting pipeline to avoid trigger-protected columns (`stage`, `amount`, `close_date`, etc.)
 
 ## Architecture
 
@@ -277,7 +281,8 @@ nodes via defensive MERGE:
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    Neon Postgres (projection)                        │
 │  Tables: action_items, action_item_versions, action_item_topics,    │
-│  action_item_topic_memberships, action_item_owners                  │
+│  action_item_topic_memberships, action_item_owners,                 │
+│  opportunities (AI columns), deal_versions                          │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 

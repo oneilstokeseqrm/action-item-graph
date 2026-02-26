@@ -591,6 +591,26 @@ To verify that a Postgres failure doesn't block Neo4j:
 
 Neo4j had 38 action items vs Postgres 35 — the difference is expected because Neo4j counts include items that were later updated (creating new version nodes), while Postgres UPSERTs update rows in place using `graph_action_item_id`.
 
+### Deal Dual-Write Verification
+
+After E2E run, verify Deal data landed in Postgres:
+
+```sql
+-- Count deals with graph cross-reference
+SELECT COUNT(*) FROM opportunities WHERE graph_opportunity_id IS NOT NULL;
+
+-- Check MEDDIC fields populated
+SELECT graph_opportunity_id, meddic_completeness, meddic_metrics IS NOT NULL as has_metrics
+FROM opportunities WHERE graph_opportunity_id IS NOT NULL;
+
+-- Count deal versions
+SELECT COUNT(*) FROM deal_versions;
+
+-- Verify ontology dimensions
+SELECT graph_opportunity_id, ontology_completeness, ontology_scores_json IS NOT NULL as has_scores
+FROM opportunities WHERE graph_opportunity_id IS NOT NULL;
+```
+
 ---
 
 ## Appendix: File Map
