@@ -719,7 +719,7 @@ class PostgresClient:
             extraction_embedding, extraction_embedding_current,
             extraction_confidence, extraction_version, source_interaction_id,
             qualification_status, source_user_id,
-            ai_workflow_metadata
+            ai_workflow_metadata, updated_at
         ) VALUES (
             gen_random_uuid(), :graph_opportunity_id, :tenant_id, :account_id, :opportunity_name, :deal_ref,
             :currency, :actual_close_date,
@@ -736,7 +736,7 @@ class PostgresClient:
             :extraction_embedding, :extraction_embedding_current,
             :extraction_confidence, :extraction_version, :source_interaction_id,
             :qualification_status, :source_user_id,
-            :ai_workflow_metadata
+            :ai_workflow_metadata, now()
         )
         ON CONFLICT (graph_opportunity_id) DO UPDATE SET
             deal_ref = :deal_ref,
