@@ -420,8 +420,9 @@ class DealPipeline:
         # ------------------------------------------------------------------
         try:
             await self._dual_write_postgres(
-                result.merge_results,
-                interaction_id,
+                merge_results=result.merge_results,
+                tenant_id=tenant_id,
+                interaction_id=interaction_id,
                 source_user_id=getattr(envelope, 'user_id', None),
             )
         except Exception:
@@ -479,6 +480,7 @@ class DealPipeline:
     async def _dual_write_postgres(
         self,
         merge_results: list,
+        tenant_id: UUID,
         interaction_id: str | None,
         source_user_id: str | None = None,
     ) -> None:
@@ -492,7 +494,7 @@ class DealPipeline:
         for merge_result in merge_results:
             try:
                 deal_node = await self.repository.get_deal(
-                    tenant_id=UUID(merge_result.details.get('tenant_id', '')),
+                    tenant_id=tenant_id,
                     opportunity_id=merge_result.opportunity_id,
                 )
                 if deal_node is None:

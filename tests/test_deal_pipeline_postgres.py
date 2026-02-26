@@ -72,7 +72,7 @@ class TestDealPipelineDualWrite:
             openai_client=mock_openai,
         )
         # Should not raise
-        await pipeline._dual_write_postgres([], str(uuid4()))
+        await pipeline._dual_write_postgres([], tenant_id=uuid4(), interaction_id=str(uuid4()))
 
     @pytest.mark.asyncio
     async def test_dual_write_failure_does_not_raise(self, mock_neo4j, mock_openai, mock_postgres):
@@ -86,5 +86,6 @@ class TestDealPipelineDualWrite:
         # Should not raise
         await pipeline._dual_write_postgres(
             [MagicMock(opportunity_id=str(uuid4()), action='created', was_new=True, version_created=False)],
-            str(uuid4()),
+            tenant_id=uuid4(),
+            interaction_id=str(uuid4()),
         )
