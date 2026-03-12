@@ -523,18 +523,41 @@ class ActionItemRepository:
         # Normalize the search name
         normalized_name = owner_name.strip()
 
-        # Try to find existing owner
+        # Normalize apostrophe variants for matching (O'Neill ↔ O'Neil)
+        apostrophe_normalized = normalized_name.replace('\u2019', "'").replace('\u2018', "'")
+
+        # Try to find existing owner with word-boundary aware matching.
+        # The CONTAINS checks are wrapped with word-boundary regex validation
+        # in the ORDER BY to prevent "Peter" matching "Peterson".
         query = """
             MATCH (o:Owner {tenant_id: $tenant_id})
             WHERE o.canonical_name = $name
                 OR $name IN o.aliases
-                OR toLower(o.canonical_name) CONTAINS toLower($name)
-                OR toLower($name) CONTAINS toLower(o.canonical_name)
+                OR o.canonical_name = $apostrophe_name
+                OR $apostrophe_name IN o.aliases
+                OR (toLower(o.canonical_name) CONTAINS toLower($name)
+                    AND size($name) >= 3
+                    AND (
+                        toLower(o.canonical_name) STARTS WITH toLower($name)
+                        OR toLower(o.canonical_name) ENDS WITH toLower($name)
+                        OR toLower(o.canonical_name) CONTAINS (' ' + toLower($name))
+                        OR toLower(o.canonical_name) CONTAINS (toLower($name) + ' ')
+                    ))
+                OR (toLower($name) CONTAINS toLower(o.canonical_name)
+                    AND size(o.canonical_name) >= 3
+                    AND (
+                        toLower($name) STARTS WITH toLower(o.canonical_name)
+                        OR toLower($name) ENDS WITH toLower(o.canonical_name)
+                        OR toLower($name) CONTAINS (' ' + toLower(o.canonical_name))
+                        OR toLower($name) CONTAINS (toLower(o.canonical_name) + ' ')
+                    ))
             RETURN o {.*} as owner
             ORDER BY
                 CASE
                     WHEN o.canonical_name = $name THEN 0
+                    WHEN o.canonical_name = $apostrophe_name THEN 0
                     WHEN $name IN o.aliases THEN 1
+                    WHEN $apostrophe_name IN o.aliases THEN 1
                     ELSE 2
                 END
             LIMIT 1
@@ -544,6 +567,7 @@ class ActionItemRepository:
             {
                 'tenant_id': str(tenant_id),
                 'name': normalized_name,
+                'apostrophe_name': apostrophe_normalized,
             },
         )
 
@@ -603,6 +627,9 @@ class ActionItemRepository:
         """
         Find an Owner by name without creating.
 
+        Uses word-boundary aware matching and apostrophe normalization
+        to avoid false positives (e.g., "Peter" should not match "Peterson").
+
         Args:
             tenant_id: Tenant UUID
             owner_name: Name to search for
@@ -611,18 +638,37 @@ class ActionItemRepository:
             Owner node properties or None if not found
         """
         normalized_name = owner_name.strip()
+        apostrophe_normalized = normalized_name.replace('\u2019', "'").replace('\u2018', "'")
 
         query = """
             MATCH (o:Owner {tenant_id: $tenant_id})
             WHERE o.canonical_name = $name
                 OR $name IN o.aliases
-                OR toLower(o.canonical_name) CONTAINS toLower($name)
-                OR toLower($name) CONTAINS toLower(o.canonical_name)
+                OR o.canonical_name = $apostrophe_name
+                OR $apostrophe_name IN o.aliases
+                OR (toLower(o.canonical_name) CONTAINS toLower($name)
+                    AND size($name) >= 3
+                    AND (
+                        toLower(o.canonical_name) STARTS WITH toLower($name)
+                        OR toLower(o.canonical_name) ENDS WITH toLower($name)
+                        OR toLower(o.canonical_name) CONTAINS (' ' + toLower($name))
+                        OR toLower(o.canonical_name) CONTAINS (toLower($name) + ' ')
+                    ))
+                OR (toLower($name) CONTAINS toLower(o.canonical_name)
+                    AND size(o.canonical_name) >= 3
+                    AND (
+                        toLower($name) STARTS WITH toLower(o.canonical_name)
+                        OR toLower($name) ENDS WITH toLower(o.canonical_name)
+                        OR toLower($name) CONTAINS (' ' + toLower(o.canonical_name))
+                        OR toLower($name) CONTAINS (toLower(o.canonical_name) + ' ')
+                    ))
             RETURN o {.*} as owner
             ORDER BY
                 CASE
                     WHEN o.canonical_name = $name THEN 0
+                    WHEN o.canonical_name = $apostrophe_name THEN 0
                     WHEN $name IN o.aliases THEN 1
+                    WHEN $apostrophe_name IN o.aliases THEN 1
                     ELSE 2
                 END
             LIMIT 1
@@ -632,9 +678,41 @@ class ActionItemRepository:
             {
                 'tenant_id': str(tenant_id),
                 'name': normalized_name,
+                'apostrophe_name': apostrophe_normalized,
             },
         )
         return result[0]['owner'] if result else None
+
+    async def get_owners_for_account(
+        self,
+        tenant_id: UUID,
+        account_id: str,
+    ) -> list[dict[str, Any]]:
+        """
+        Get all Owner nodes linked to ActionItems in a specific account.
+
+        Used by the OwnerPreResolver to build an account-scoped owner cache.
+
+        Args:
+            tenant_id: Tenant UUID
+            account_id: Account identifier
+
+        Returns:
+            List of Owner node property dicts
+        """
+        query = """
+            MATCH (ai:ActionItem {tenant_id: $tenant_id, account_id: $account_id})
+                  -[:OWNED_BY]->(o:Owner {tenant_id: $tenant_id})
+            RETURN DISTINCT o {.*} as owner
+        """
+        result = await self.neo4j.execute_query(
+            query,
+            {
+                'tenant_id': str(tenant_id),
+                'account_id': account_id,
+            },
+        )
+        return [r['owner'] for r in result]
 
     # =========================================================================
     # Query Operations

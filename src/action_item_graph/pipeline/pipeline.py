@@ -40,6 +40,7 @@ from ..models.topic import ActionItemTopic
 from ..repository import ActionItemRepository
 from .consolidator import ActionItemConsolidator
 from .extractor import ActionItemExtractor, ExtractionOutput
+from .owner_resolver import OwnerPreResolver
 from .matcher import ActionItemMatcher, MatchResult
 from .merger import ActionItemMerger, MergeResult
 from .topic_executor import TopicExecutionResult, TopicExecutor
@@ -350,11 +351,19 @@ class ActionItemPipeline:
                     logger.info("pipeline_complete_all_filtered", **timer.summary())
                     return result
 
-                # Step 5: Create Interaction node in graph
+                # Step 5: Owner pre-resolution (normalize names before matching)
+                with timer.stage("owner_resolution"):
+                    owner_resolver = OwnerPreResolver(
+                        self.repository, self.openai,
+                    )
+                    await owner_resolver.load_cache(tenant_id, account_id)
+                    await owner_resolver.resolve_batch(extraction.action_items)
+
+                # Step 6: Create Interaction node in graph
                 with timer.stage("create_interaction"):
                     await self.repository.create_interaction(extraction.interaction)
 
-                # Step 6: Match against existing items (account-scoped)
+                # Step 7: Match against existing items (account-scoped)
                 with timer.stage("matching"):
                     match_results, filtered_action_items = await self._match_extractions(
                         extraction=extraction,
@@ -371,7 +380,7 @@ class ActionItemPipeline:
                     total_unmatched=result.total_unmatched,
                 )
 
-                # Step 7: Execute merge decisions
+                # Step 8: Execute merge decisions
                 with timer.stage("merging"):
                     merge_results = await self._execute_merges(
                         match_results=match_results,
@@ -379,7 +388,7 @@ class ActionItemPipeline:
                         interaction=extraction.interaction,
                     )
 
-                # Step 8: Topic Resolution (Phase 7: Topic Grouping)
+                # Step 9: Topic Resolution (Phase 7: Topic Grouping)
                 if self.enable_topics:
                     with timer.stage("topic_resolution"):
                         topic_exec_results = await self._process_topics(
@@ -398,7 +407,7 @@ class ActionItemPipeline:
                         topics_linked=result.topics_linked,
                     )
 
-                # Step 9: Dual-write to Postgres (failure-isolated)
+                # Step 10: Dual-write to Postgres (failure-isolated)
                 if self.postgres is not None:
                     with timer.stage("postgres_dual_write"):
                         await self._dual_write_postgres(
@@ -555,6 +564,14 @@ class ActionItemPipeline:
                 result.stage_timings = timer.stages.copy()
                 logger.info("process_text_complete_all_filtered", **timer.summary())
                 return result
+
+            # Owner pre-resolution (normalize names before matching)
+            with timer.stage("owner_resolution"):
+                owner_resolver = OwnerPreResolver(
+                    self.repository, self.openai,
+                )
+                await owner_resolver.load_cache(tenant_id, account_id)
+                await owner_resolver.resolve_batch(extraction.action_items)
 
             # Create Interaction in graph
             with timer.stage("create_interaction"):
