@@ -503,19 +503,23 @@ class ActionItemRepository:
         self,
         tenant_id: UUID,
         owner_name: str,
+        account_id: str | None = None,
     ) -> dict[str, Any]:
         """
         Find an existing Owner by name/alias, or create a new one.
 
         Matching logic:
-        1. Exact match on canonical_name
-        2. Match in aliases list
-        3. Case-insensitive partial match (e.g., "John" matches "John Smith")
+        1. Exact match on canonical_name (tenant-wide)
+        2. Match in aliases list (tenant-wide)
+        3. Case-insensitive partial match, scoped to account when account_id
+           is provided (prevents cross-account false positives like "Peter"
+           matching "Peter Johnson" from a different account)
         4. Create new Owner if no match
 
         Args:
             tenant_id: Tenant UUID
             owner_name: Name from extraction (e.g., "John", "Sarah")
+            account_id: Optional account ID to scope substring matching
 
         Returns:
             Owner node properties (existing or newly created)
@@ -523,29 +527,62 @@ class ActionItemRepository:
         # Normalize the search name
         normalized_name = owner_name.strip()
 
-        # Try to find existing owner
-        query = """
-            MATCH (o:Owner {tenant_id: $tenant_id})
+        # Normalize apostrophe variants for matching (O'Neill ↔ O'Neil)
+        apostrophe_normalized = normalized_name.replace('\u2019', "'").replace('\u2018', "'")
+
+        # When account_id is provided, substring matching is scoped to owners
+        # linked to ActionItems in this account via OWNED_BY relationship.
+        # Exact/alias matches remain tenant-wide (high confidence).
+        account_scope_clause = ""
+        if account_id:
+            account_scope_clause = """
+                AND EXISTS {
+                    MATCH (ai:ActionItem {tenant_id: $tenant_id, account_id: $account_id})
+                          -[:OWNED_BY]->(o)
+                }"""
+
+        query = f"""
+            MATCH (o:Owner {{tenant_id: $tenant_id}})
             WHERE o.canonical_name = $name
                 OR $name IN o.aliases
-                OR toLower(o.canonical_name) CONTAINS toLower($name)
-                OR toLower($name) CONTAINS toLower(o.canonical_name)
-            RETURN o {.*} as owner
+                OR o.canonical_name = $apostrophe_name
+                OR $apostrophe_name IN o.aliases
+                OR (toLower(o.canonical_name) CONTAINS toLower($name)
+                    AND size($name) >= 3
+                    AND (
+                        toLower(o.canonical_name) STARTS WITH toLower($name)
+                        OR toLower(o.canonical_name) ENDS WITH toLower($name)
+                        OR toLower(o.canonical_name) CONTAINS (' ' + toLower($name))
+                        OR toLower(o.canonical_name) CONTAINS (toLower($name) + ' ')
+                    ){account_scope_clause})
+                OR (toLower($name) CONTAINS toLower(o.canonical_name)
+                    AND size(o.canonical_name) >= 3
+                    AND (
+                        toLower($name) STARTS WITH toLower(o.canonical_name)
+                        OR toLower($name) ENDS WITH toLower(o.canonical_name)
+                        OR toLower($name) CONTAINS (' ' + toLower(o.canonical_name))
+                        OR toLower($name) CONTAINS (toLower(o.canonical_name) + ' ')
+                    ){account_scope_clause})
+            RETURN o {{.*}} as owner
             ORDER BY
                 CASE
                     WHEN o.canonical_name = $name THEN 0
+                    WHEN o.canonical_name = $apostrophe_name THEN 0
                     WHEN $name IN o.aliases THEN 1
+                    WHEN $apostrophe_name IN o.aliases THEN 1
                     ELSE 2
                 END
             LIMIT 1
         """
-        result = await self.neo4j.execute_query(
-            query,
-            {
-                'tenant_id': str(tenant_id),
-                'name': normalized_name,
-            },
-        )
+        params: dict[str, str] = {
+            'tenant_id': str(tenant_id),
+            'name': normalized_name,
+            'apostrophe_name': apostrophe_normalized,
+        }
+        if account_id:
+            params['account_id'] = account_id
+
+        result = await self.neo4j.execute_query(query, params)
 
         if result:
             owner = result[0]['owner']
@@ -599,42 +636,107 @@ class ActionItemRepository:
         self,
         tenant_id: UUID,
         owner_name: str,
+        account_id: str | None = None,
     ) -> dict[str, Any] | None:
         """
         Find an Owner by name without creating.
 
+        Uses word-boundary aware matching and apostrophe normalization
+        to avoid false positives (e.g., "Peter" should not match "Peterson").
+
         Args:
             tenant_id: Tenant UUID
             owner_name: Name to search for
+            account_id: Optional account ID to scope substring matching
 
         Returns:
             Owner node properties or None if not found
         """
         normalized_name = owner_name.strip()
+        apostrophe_normalized = normalized_name.replace('\u2019', "'").replace('\u2018', "'")
 
-        query = """
-            MATCH (o:Owner {tenant_id: $tenant_id})
+        account_scope_clause = ""
+        if account_id:
+            account_scope_clause = """
+                AND EXISTS {
+                    MATCH (ai:ActionItem {tenant_id: $tenant_id, account_id: $account_id})
+                          -[:OWNED_BY]->(o)
+                }"""
+
+        query = f"""
+            MATCH (o:Owner {{tenant_id: $tenant_id}})
             WHERE o.canonical_name = $name
                 OR $name IN o.aliases
-                OR toLower(o.canonical_name) CONTAINS toLower($name)
-                OR toLower($name) CONTAINS toLower(o.canonical_name)
-            RETURN o {.*} as owner
+                OR o.canonical_name = $apostrophe_name
+                OR $apostrophe_name IN o.aliases
+                OR (toLower(o.canonical_name) CONTAINS toLower($name)
+                    AND size($name) >= 3
+                    AND (
+                        toLower(o.canonical_name) STARTS WITH toLower($name)
+                        OR toLower(o.canonical_name) ENDS WITH toLower($name)
+                        OR toLower(o.canonical_name) CONTAINS (' ' + toLower($name))
+                        OR toLower(o.canonical_name) CONTAINS (toLower($name) + ' ')
+                    ){account_scope_clause})
+                OR (toLower($name) CONTAINS toLower(o.canonical_name)
+                    AND size(o.canonical_name) >= 3
+                    AND (
+                        toLower($name) STARTS WITH toLower(o.canonical_name)
+                        OR toLower($name) ENDS WITH toLower(o.canonical_name)
+                        OR toLower($name) CONTAINS (' ' + toLower(o.canonical_name))
+                        OR toLower($name) CONTAINS (toLower(o.canonical_name) + ' ')
+                    ){account_scope_clause})
+            RETURN o {{.*}} as owner
             ORDER BY
                 CASE
                     WHEN o.canonical_name = $name THEN 0
+                    WHEN o.canonical_name = $apostrophe_name THEN 0
                     WHEN $name IN o.aliases THEN 1
+                    WHEN $apostrophe_name IN o.aliases THEN 1
                     ELSE 2
                 END
             LIMIT 1
+        """
+        params: dict[str, str] = {
+            'tenant_id': str(tenant_id),
+            'name': normalized_name,
+            'apostrophe_name': apostrophe_normalized,
+        }
+        if account_id:
+            params['account_id'] = account_id
+
+        result = await self.neo4j.execute_query(query, params)
+        return result[0]['owner'] if result else None
+
+    async def get_owners_for_account(
+        self,
+        tenant_id: UUID,
+        account_id: str,
+    ) -> list[dict[str, Any]]:
+        """
+        Get all Owner nodes linked to ActionItems in a specific account.
+
+        Used by the OwnerPreResolver to build an account-scoped owner cache.
+
+        Args:
+            tenant_id: Tenant UUID
+            account_id: Account identifier
+
+        Returns:
+            List of Owner node property dicts
+        """
+        query = """
+            MATCH (ai:ActionItem {tenant_id: $tenant_id, account_id: $account_id})
+                  -[:OWNED_BY]->(o:Owner {tenant_id: $tenant_id})
+            RETURN DISTINCT o {.*} as owner
         """
         result = await self.neo4j.execute_query(
             query,
             {
                 'tenant_id': str(tenant_id),
-                'name': normalized_name,
+                'account_id': account_id,
             },
         )
-        return result[0]['owner'] if result else None
+        return [r['owner'] for r in result]
 
     # =========================================================================
     # Query Operations
@@ -675,6 +777,56 @@ class ActionItemRepository:
             WHERE ai.tenant_id = $tenant_id {status_filter}
             RETURN ai {{.*}} as action_item
             ORDER BY ai.created_at DESC
+            LIMIT $limit
+        """
+        result = await self.neo4j.execute_query(query, params)
+        return [r['action_item'] for r in result]
+
+    async def get_prioritized_action_items(
+        self,
+        tenant_id: UUID,
+        account_id: str,
+        status: ActionItemStatus | str | None = None,
+        min_priority: float | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """
+        Get ActionItems sorted by priority score (highest first).
+
+        Args:
+            tenant_id: Tenant UUID
+            account_id: Account identifier
+            status: Optional status filter (defaults to 'open')
+            min_priority: Optional minimum priority score threshold
+            limit: Maximum results
+
+        Returns:
+            List of ActionItem node properties, ordered by priority_score DESC
+        """
+        filters = []
+        params: dict[str, Any] = {
+            'tenant_id': str(tenant_id),
+            'account_id': account_id,
+            'limit': limit,
+        }
+
+        if status:
+            filters.append('ai.status = $status')
+            params['status'] = status.value if isinstance(status, ActionItemStatus) else status
+
+        if min_priority is not None:
+            filters.append('ai.priority_score >= $min_priority')
+            params['min_priority'] = min_priority
+
+        where_clause = ' AND '.join(filters)
+        if where_clause:
+            where_clause = 'AND ' + where_clause
+
+        query = f"""
+            MATCH (a:Account {{account_id: $account_id, tenant_id: $tenant_id}})-[:HAS_ACTION_ITEM]->(ai:ActionItem)
+            WHERE ai.tenant_id = $tenant_id {where_clause}
+            RETURN ai {{.*}} as action_item
+            ORDER BY ai.priority_score DESC
             LIMIT $limit
         """
         result = await self.neo4j.execute_query(query, params)

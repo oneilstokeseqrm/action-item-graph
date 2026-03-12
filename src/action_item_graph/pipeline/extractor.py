@@ -19,6 +19,38 @@ from ..prompts.extract_action_items import (
 )
 
 
+def compute_priority_score(
+    impact: int,
+    urgency: int,
+    specificity: int,
+    confidence: float,
+) -> float:
+    """
+    Compute a weighted priority score (0.0-1.0).
+
+    Weights: impact 0.40, urgency 0.35, specificity 0.15, confidence 0.10.
+    These weights reflect that business impact and time sensitivity are the
+    strongest signals for prioritization, while specificity and confidence
+    serve as quality tiebreakers.
+
+    Args:
+        impact: Business impact score (1-5)
+        urgency: Time sensitivity score (1-5)
+        specificity: Actionability score (1-5)
+        confidence: Extraction confidence (0.0-1.0)
+
+    Returns:
+        Weighted priority score (0.0-1.0), rounded to 3 decimal places
+    """
+    return round(
+        0.40 * (impact / 5)
+        + 0.35 * (urgency / 5)
+        + 0.15 * (specificity / 5)
+        + 0.10 * confidence,
+        3,
+    )
+
+
 class ExtractionOutput:
     """Output from the extraction process."""
 
@@ -117,6 +149,14 @@ class ActionItemExtractor:
             user_id=envelope.user_id,
             pg_user_id=envelope.pg_user_id,
         )
+
+        # Auto-resolve recording user's owner name to canonical form
+        user_name = envelope.extras.get('user_name') if envelope.extras else None
+        if user_name:
+            for action_item, raw in zip(action_items, extraction_result.action_items):
+                if raw.is_user_owned and action_item.owner != user_name:
+                    action_item.owner = user_name
+                    action_item.owner_type = 'named'
 
         # Update interaction with count
         interaction.action_item_count = len(action_items)
@@ -268,6 +308,14 @@ class ActionItemExtractor:
             else:
                 status = ActionItemStatus.OPEN
 
+            # Compute priority score from extraction dimensions
+            priority = compute_priority_score(
+                impact=extraction.score_impact,
+                urgency=extraction.score_urgency,
+                specificity=extraction.score_specificity,
+                confidence=extraction.confidence,
+            )
+
             action_item = ActionItem(
                 id=uuid4(),
                 tenant_id=tenant_id,
@@ -285,6 +333,17 @@ class ActionItemExtractor:
                 embedding=embedding,
                 embedding_current=embedding,  # Same as original initially
                 confidence=extraction.confidence,
+                # First-class scoring fields (Phase 4)
+                commitment_strength=extraction.commitment_strength,
+                score_impact=extraction.score_impact,
+                score_urgency=extraction.score_urgency,
+                score_specificity=extraction.score_specificity,
+                score_effort=extraction.score_effort,
+                priority_score=priority,
+                definition_of_done=extraction.definition_of_done,
+                attributes={
+                    'decision_context': extraction.decision_context,
+                },
             )
 
             # TODO: Parse due_date_text into actual datetime

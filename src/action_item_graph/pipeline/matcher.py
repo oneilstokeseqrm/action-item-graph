@@ -55,9 +55,11 @@ class ActionItemMatcher:
     3. Return match decisions for merger to act on
     """
 
-    # Similarity thresholds
-    MIN_SIMILARITY_SCORE = 0.65  # Below this, don't consider as candidate
-    HIGH_CONFIDENCE_THRESHOLD = 0.85  # Above this, high confidence match
+    # Graduated matching thresholds (Phase 4: Quality Overhaul)
+    # Three-tier approach to reduce unnecessary LLM calls:
+    MIN_SIMILARITY_SCORE = 0.68  # Below this, auto-create new (no LLM call)
+    LLM_ZONE_UPPER = 0.88  # Above this, auto-match (skip LLM call)
+    HIGH_CONFIDENCE_THRESHOLD = 0.85  # Legacy — kept for compatibility
 
     def __init__(
         self,
@@ -120,14 +122,25 @@ class ActionItemMatcher:
                 )
                 continue
 
-            # Run deduplication on each candidate
+            # Graduated matching: three-tier approach
             decisions = []
             for candidate in candidates:
-                decision = await self._deduplicate(
-                    existing=candidate.node_properties,
-                    new_extraction=extracted,
-                    similarity_score=candidate.similarity_score,
-                )
+                if candidate.similarity_score >= self.LLM_ZONE_UPPER:
+                    # Auto-match: similarity is so high, skip LLM call
+                    decision = DeduplicationDecision(
+                        is_same_item=True,
+                        is_status_update=extracted.is_status_update,
+                        merge_recommendation='update_status' if extracted.is_status_update else 'merge',
+                        reasoning=f'Auto-matched: similarity {candidate.similarity_score:.3f} >= {self.LLM_ZONE_UPPER}',
+                        confidence=candidate.similarity_score,
+                    )
+                else:
+                    # LLM zone: ask the model to decide
+                    decision = await self._deduplicate(
+                        existing=candidate.node_properties,
+                        new_extraction=extracted,
+                        similarity_score=candidate.similarity_score,
+                    )
                 decisions.append((candidate, decision))
 
             # Find best match (if any)

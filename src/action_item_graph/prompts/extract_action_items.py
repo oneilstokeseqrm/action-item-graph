@@ -107,6 +107,46 @@ class ExtractedActionItem(BaseModel):
         'Lower if ambiguous or uncertain.',
     )
 
+    # Five-Field Commitment Framework (Phase 1: Quality Overhaul)
+    commitment_strength: Literal['explicit', 'conditional', 'weak', 'observation'] = Field(
+        default='explicit',
+        description='How strongly the speaker committed to this action: '
+        '"explicit" = clear first-person commitment ("I will...", "Let me..."), '
+        '"conditional" = depends on something ("If X happens, I\'ll..."), '
+        '"weak" = vague intention ("We should...", "It would be nice if..."), '
+        '"observation" = third-party expectation, NOT a personal commitment.',
+    )
+    decision_context: str | None = Field(
+        default=None,
+        max_length=200,
+        description='What was decided or agreed upon that makes this action item necessary. '
+        'Null if no explicit decision was made.',
+    )
+    definition_of_done: str | None = Field(
+        default=None,
+        max_length=200,
+        description='What proves this action item is complete '
+        '(e.g., "Proposal email received by client"). Null if not determinable.',
+    )
+
+    # Scoring dimensions (Phase 1: Quality Overhaul)
+    score_impact: int = Field(
+        default=3, ge=1, le=5,
+        description='Business impact (1=trivial administrative, 5=deal-critical or revenue-blocking).',
+    )
+    score_urgency: int = Field(
+        default=3, ge=1, le=5,
+        description='Time sensitivity (1=no rush, 5=blocking/overdue right now).',
+    )
+    score_specificity: int = Field(
+        default=3, ge=1, le=5,
+        description='How actionable and specific (1=vague "follow up", 5=crystal clear deliverable).',
+    )
+    score_effort: int = Field(
+        default=3, ge=1, le=5,
+        description='Estimated effort (1=5 minutes, 5=multi-day project).',
+    )
+
 
 class ExtractionResult(BaseModel):
     """Complete extraction result from a transcript."""
@@ -130,40 +170,105 @@ class ExtractionResult(BaseModel):
 # Prompt Templates
 # =============================================================================
 
-EXTRACTION_SYSTEM_PROMPT = """You are an expert at identifying action items from sales call transcripts and meeting notes.
+EXTRACTION_SYSTEM_PROMPT = """You are an expert at identifying actionable commitments from sales call transcripts and meeting notes.
 
-An ACTION ITEM is a specific task or commitment that someone agrees to do. It must be:
-- A concrete, actionable task (not just a topic of discussion)
-- Assigned to or claimed by a specific person
-- Something that requires follow-up action
+## YOUR TASK — Two-Step Focused Extraction
+
+Follow this two-step process to identify ONLY genuine, actionable commitments:
+
+### Step 1: Identify Commitment Signals
+
+Scan the transcript for COMMITMENT LANGUAGE — moments where a specific person pledges to do something concrete.
+
+<commitment_signals>
+- First-person future tense: "I will...", "I'll...", "Let me..."
+- Explicit promises: "I can have that to you by..."
+- Acceptance of assignment: "I'll take care of that", "Leave that with me"
+- Scheduling commitments: "Let's schedule...", "I'll set up a time..."
+- Deadline commitments: "I'll have it done by Friday"
+</commitment_signals>
+
+<not_commitments>
+- Observations about others: "Salesforce numbers should be fixed by end of week" (who committed?)
+- Vague intentions: "We should think about...", "Let's stay in touch", "It would be nice if..."
+- Questions without answers: "Should we review the contract?"
+- Informational statements: "Aditya is on Slack if you need help", "The team uses Jira"
+- Expectations of third parties: "They'll probably get back to us", "That feature is coming in Q3"
+- Casual past mentions with no new info: "We set up a bi-weekly cadence" (already established routine)
+- Conditional wishes: "If you're looking forward to having a session, we could set one up"
+- Status observations: "Numbers should be whatever they're doing behind the scenes"
+</not_commitments>
+
+**IMPORTANT — Status updates ARE valid extractions:**
+If someone reports progress on a previously committed task (e.g., "I sent the budget analysis
+to finance yesterday, they're reviewing it now"), extract it as a STATUS UPDATE with
+`is_status_update=true` and the appropriate `implied_status`. These help track completion
+of earlier commitments.
+
+### Step 2: Evaluate Each Signal Against the Commitment Framework
+
+For each commitment signal you identified, verify it passes these criteria:
+
+1. **Decision**: What was agreed? (Not just a discussion topic — a closed decision)
+2. **Action**: What is the specific deliverable? (Not "follow up" but "send the pricing deck")
+3. **Owner**: Can you identify ONE person responsible? (Not a team, not vague)
+4. **Timeline**: Is there any time indication? (Even approximate — note if missing)
+5. **Definition of Done**: What proves completion? (If you can't define it, it may not be actionable)
+
+**If a signal fails criteria 1-3, DO NOT extract it.** If it fails only 4-5, extract it but assign lower specificity scores.
+
+## EXTRACTION LIMITS
+
+Extract the **3 to 5 most significant** action items per transcript. If the transcript genuinely contains more high-quality commitments, you may extract up to 8, but NEVER more than 8.
+
+**Prioritize:**
+- Deal-advancing commitments over administrative tasks
+- Explicit commitments over weak intentions
+- Items with clear owners over unattributed tasks
+- Time-bound items over open-ended ones
+
+**Consolidate sub-tasks:** If multiple items are sub-steps of the same deliverable, consolidate into a single action item. For example:
+- "Send the pricing deck, the SOC2 report, and the security whitepaper" = ONE item ("Send evaluation materials package")
+- "Start planning the renewal" + "Communicate the renewal plan to the customer" = ONE item ("Plan and communicate renewal strategy")
+
+## ITEM TYPES
 
 Extract TWO types of items:
 
 1. **NEW ACTION ITEMS**: Fresh commitments made during this conversation
-   Examples:
-   - "I'll send over the proposal by Friday"
-   - "Let me schedule a demo with the technical team"
-   - "I need to loop in legal on this"
+2. **STATUS UPDATES**: References to previously committed items (e.g., "I sent that deck", "Done!")
 
-2. **STATUS UPDATES**: References to previously committed items
-   Examples:
-   - "I sent that deck yesterday"
-   - "Done! The contract is signed"
-   - "I finished the analysis you asked for"
-   - "That proposal is still in progress"
+## SCORING GUIDE
 
-For each item, extract:
-- **action_item_text**: The verbatim or near-verbatim text from the transcript
-- **owner**: Who is responsible (see Speaker Attribution Rules above)
-- **owner_type**: How the owner was identified: "named", "role_inferred", or "unconfirmed"
-- **is_user_owned**: Whether this action item belongs to the recording user
-- **summary**: 1-sentence actionable description
-- **conversation_context**: 1-2 sentences of surrounding context
-- **topic**: The high-level project/theme this action item belongs to (see Topic Guidelines below)
-- **due_date_text**: Timeframe if mentioned (null if not)
-- **is_status_update**: true for status updates, false for new items
-- **implied_status**: For status updates, what status? (completed/in_progress/cancelled/deferred)
-- **confidence**: Your confidence in this extraction (0.0-1.0)
+For each extracted item, assign scores on a 1-5 scale:
+
+**Impact** (score_impact):
+- 5: Deal-critical — blocks a purchase decision, legal requirement, revenue at stake
+- 4: High-value — advances deal stage, satisfies key stakeholder request
+- 3: Important — standard follow-up with clear business value
+- 2: Nice-to-have — informational, relationship maintenance
+- 1: Trivial — minor administrative task
+
+**Urgency** (score_urgency):
+- 5: Blocking/overdue — someone is waiting right now
+- 4: Hard deadline within 48 hours
+- 3: Expected within a week
+- 2: Expected within a month, no hard deadline
+- 1: No time pressure, whenever convenient
+
+**Specificity** (score_specificity):
+- 5: Crystal clear — anyone could execute ("Send Q1 pricing deck to sarah@acme.com by Friday 5pm")
+- 4: Clear deliverable, minor details to fill in ("Schedule a demo with their tech team next week")
+- 3: Understood in context but needs clarification for someone else
+- 2: Vague deliverable ("Follow up with them")
+- 1: Unclear what "done" looks like
+
+**Effort** (score_effort):
+- 5: Multi-day project (build a POC, draft a full proposal)
+- 4: Half-day task (prepare a presentation, write a detailed analysis)
+- 3: 1-2 hour task (draft an email, schedule a complex meeting)
+- 2: 15-30 minute task (send an existing document, make a quick call)
+- 1: 5 minutes or less (forward an email, send a calendar invite)
 
 ## Topic Guidelines
 
@@ -178,14 +283,11 @@ Good topic examples:
 - "Hire 3 SDRs by March" → Topic: "Q1 Sales Team Expansion"
 - "Review security audit findings" → Topic: "Annual Security Compliance"
 - "Send updated pricing deck" → Topic: "Enterprise Deal Proposal"
-- "Schedule demo with engineering" → Topic: "Technical Evaluation Process"
 
 Bad topic examples (do NOT use):
 - Too specific: "Hire SDR Named John" (should be broader initiative)
 - Too broad: "Work", "Tasks", "Sales" (not specific enough)
 - Too vague: "Stuff To Do", "Follow Ups" (not meaningful)
-
-For the topic context, explain in 1-2 sentences WHY this action item belongs to this topic.
 
 ## Speaker Attribution Rules
 
@@ -217,20 +319,34 @@ corresponds to them using contextual clues (who opens the meeting, who introduce
 who says "I'll follow up"). Set `is_user_owned` to true for action items owned by the
 recording user. This does NOT filter items — extract everything, just tag the user's items.
 
-Guidelines:
-- Extract ALL action items, even if uncertain (just lower the confidence)
+## OUTPUT RULES
+
+- Set has_action_items=false if no genuine commitments are found
+- Use extraction_notes to explain if you filtered out borderline items
+- The confidence field should reflect extraction certainty (did the person clearly commit?)
+- Set commitment_strength to categorize the nature of the commitment
+- Do NOT extract items with commitment_strength='observation' — those are not action items
 - Do NOT extract vague intentions ("we should think about...")
 - Do NOT extract questions without commitments
-- Do NOT extract past actions that don't require follow-up
-- If the transcript has no action items, return an empty list with has_action_items=false"""
+- Do NOT extract past actions that don't require follow-up"""
 
-EXTRACTION_USER_PROMPT_TEMPLATE = """Extract all action items from the following transcript.
+EXTRACTION_USER_PROMPT_TEMPLATE = """Extract actionable commitments from the following transcript.
+
+<context>
+{additional_context}
+</context>
 
 <transcript>
 {transcript_text}
 </transcript>
 
-{additional_context}"""
+<instructions>
+1. Identify commitment signals in the transcript (first-person future tense, explicit promises, etc.)
+2. Filter each signal against the commitment framework (Decision, Action, Owner, Timeline, Done)
+3. Consolidate related sub-tasks into single items where appropriate
+4. Score each surviving item on impact, urgency, specificity, and effort
+5. Return the 3-5 most significant items (max 8 if truly warranted)
+</instructions>"""
 
 
 def build_extraction_prompt(

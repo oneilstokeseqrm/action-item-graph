@@ -234,7 +234,10 @@ class PostgresClient:
                 is_user_owned, conversation_context, version_number,
                 evolution_summary, source_interaction_id, source_user_id,
                 embedding, embedding_current,
-                valid_at, invalid_at, invalidated_by
+                valid_at, invalid_at, invalidated_by,
+                commitment_strength, score_impact, score_urgency,
+                score_specificity, score_effort, priority_score,
+                definition_of_done
             ) VALUES (
                 :id, :tenant_id, :title, :description,
                 CAST(:status AS "ActionItemStatus"), :due_date,
@@ -244,7 +247,10 @@ class PostgresClient:
                 :is_user_owned, :conversation_context, :version_number,
                 :evolution_summary, :source_interaction_id, :source_user_id,
                 CAST(:embedding AS vector), CAST(:embedding_current AS vector),
-                :valid_at, :invalid_at, :invalidated_by
+                :valid_at, :invalid_at, :invalidated_by,
+                :commitment_strength, :score_impact, :score_urgency,
+                :score_specificity, :score_effort, :priority_score,
+                :definition_of_done
             )
             ON CONFLICT (graph_action_item_id) DO UPDATE SET
                 title = EXCLUDED.title,
@@ -261,6 +267,13 @@ class PostgresClient:
                 valid_at = EXCLUDED.valid_at,
                 invalid_at = EXCLUDED.invalid_at,
                 invalidated_by = EXCLUDED.invalidated_by,
+                commitment_strength = EXCLUDED.commitment_strength,
+                score_impact = EXCLUDED.score_impact,
+                score_urgency = EXCLUDED.score_urgency,
+                score_specificity = EXCLUDED.score_specificity,
+                score_effort = EXCLUDED.score_effort,
+                priority_score = EXCLUDED.priority_score,
+                definition_of_done = EXCLUDED.definition_of_done,
                 updated_at = EXCLUDED.updated_at
         """)
 
@@ -299,6 +312,13 @@ class PostgresClient:
             'valid_at': _to_pg_ts(item.valid_at),
             'invalid_at': _to_pg_ts(item.invalid_at),
             'invalidated_by': _to_pg_uuid(item.invalidated_by),
+            'commitment_strength': item.commitment_strength,
+            'score_impact': item.score_impact,
+            'score_urgency': item.score_urgency,
+            'score_specificity': item.score_specificity,
+            'score_effort': item.score_effort,
+            'priority_score': item.priority_score,
+            'definition_of_done': item.definition_of_done,
         }
 
         async with self.engine.begin() as conn:

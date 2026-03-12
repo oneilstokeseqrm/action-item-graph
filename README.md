@@ -4,9 +4,12 @@ A temporal knowledge graph pipeline for extracting and managing action items fro
 
 ## Features
 
-- **Intelligent Extraction**: Extract action items from call transcripts using GPT-4.1-mini with structured output
+- **Quality-First Extraction**: F-CoT (Focused Chain-of-Thought) prompting with Five-Field Commitment Framework extracts 2-3 high-quality items per interaction instead of 5+ noisy ones
+- **Multi-Stage Validation**: Within-batch consolidation (embedding clustering) + LLM-as-Judge adversarial verification filter weak extractions
+- **Owner Resolution**: Account-scoped alias caches with fuzzy matching, word-boundary awareness, and LLM role-to-name resolution
+- **Priority Scoring**: Weighted composite scoring (impact, urgency, specificity, confidence) enables priority-based retrieval
+- **Graduated Matching**: Three-tier thresholds (auto-match/LLM/auto-create) reduce LLM deduplication calls by ~60%
 - **Dual-Mode Detection**: Identifies both new action items and status updates to existing items
-- **Smart Matching**: Vector similarity search combined with LLM-based deduplication prevents duplicates
 - **Topic Grouping**: Automatically clusters action items into high-level themes/projects for cross-conversation tracking
 - **Temporal Tracking**: Full version history and bi-temporal validity for audit trails
 - **Multi-Tenancy**: Complete data isolation via `tenant_id` and `account_id` scoping on all nodes
@@ -248,41 +251,50 @@ nodes via defensive MERGE:
                                    │
                                    ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                      Extraction Pipeline                             │
-│  1. ActionItemExtractor: GPT-4.1-mini structured output              │
+│                      Extraction (F-CoT)                              │
+│  1. ActionItemExtractor: Commitment framework + scoring dimensions   │
 │  2. Dual-mode: new items + status updates + topic assignment         │
 │  3. Embeddings: text-embedding-3-small (1536 dims)                   │
 └─────────────────────────────────────────────────────────────────────┘
                                    │
                                    ▼
 ┌─────────────────────────────────────────────────────────────────────┐
+│                      Quality Gates                                   │
+│  1. Consolidator: Within-batch dedup (embedding clustering, 0.80)    │
+│  2. Verifier: LLM-as-Judge adversarial check (confidence floor 0.4) │
+│  3. Owner Pre-Resolver: Account-scoped alias cache + fuzzy matching  │
+└─────────────────────────────────────────────────────────────────────┘
+                                   │
+                                   ▼
+┌─────────────────────────────────────────────────────────────────────┐
 │                    Matching & Deduplication                          │
-│  1. ActionItemMatcher: Vector similarity (dual index search)         │
-│  2. LLM deduplication decision (same/related/new)                    │
+│  1. ActionItemMatcher: Graduated thresholds (0.68/0.88)              │
+│  2. Auto-match (>=0.88), LLM zone (0.68-0.88), auto-create (<0.68) │
 │  3. ActionItemMerger: Execute merge/update/create                    │
 └─────────────────────────────────────────────────────────────────────┘
                                    │
                                    ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                       Topic Resolution                               │
+│                       Topic Resolution + Scoring                     │
 │  1. TopicResolver: Match extracted topic to existing (dual search)   │
-│  2. Threshold-based: auto-link (>=0.85), auto-create (<0.70)         │
-│  3. TopicExecutor: Create/link topics with evolving summaries        │
+│  2. TopicExecutor: Create/link topics with evolving summaries        │
+│  3. Priority scoring: 0.40×impact + 0.35×urgency + 0.15×spec + ...  │
 └─────────────────────────────────────────────────────────────────────┘
                                    │
                                    ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                       Neo4j Graph Store (source of truth)            │
 │  Nodes: Account, Interaction, ActionItem, ActionItemTopic, Owner, +  │
+│  ActionItem scoring fields: priority_score, commitment_strength, ... │
 │  Vector indexes: ActionItem + ActionItemTopic (embedding + current)  │
 └─────────────────────────────────────────────────────────────────────┘
                                    │
                                    ▼ (optional dual-write)
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    Neon Postgres (projection)                        │
-│  Tables: action_items, action_item_versions, action_item_topics,    │
-│  action_item_topic_memberships, action_item_owners,                 │
-│  opportunities (AI columns), deal_versions                          │
+│  Tables: action_items (+scoring columns), action_item_versions,     │
+│  action_item_topics, action_item_topic_memberships,                 │
+│  action_item_owners, opportunities (AI columns), deal_versions      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -290,13 +302,16 @@ nodes via defensive MERGE:
 
 | Component | Description |
 |-----------|-------------|
-| `ActionItemExtractor` | Extracts action items + topics using GPT-4.1-mini structured output |
-| `ActionItemMatcher` | Finds similar existing items via vector search + LLM deduplication |
+| `ActionItemExtractor` | F-CoT extraction with commitment framework + scoring dimensions |
+| `ActionItemConsolidator` | Within-batch dedup via embedding cosine similarity clustering |
+| `ActionItemVerifier` | LLM-as-Judge adversarial quality validation |
+| `OwnerPreResolver` | Account-scoped owner cache with fuzzy matching + LLM role resolution |
+| `ActionItemMatcher` | Graduated threshold matching (auto-match/LLM/auto-create) |
 | `ActionItemMerger` | Executes match decisions (create, merge, update status) |
 | `TopicResolver` | Matches extracted topics to existing using threshold-based logic |
 | `TopicExecutor` | Creates/links topics with evolving summaries |
 | `ActionItemRepository` | Low-level graph CRUD operations |
-| `ActionItemPipeline` | Orchestrates the full extraction-match-merge-topic flow |
+| `ActionItemPipeline` | Orchestrates the full 10-stage pipeline |
 | `DealPipeline` | Orchestrates deal extraction, vector matching, and LLM-synthesized merging |
 | `EnvelopeDispatcher` | Routes envelopes to both pipelines concurrently with fault isolation |
 | `Railway API` | FastAPI service receiving events from Lambda, dispatching to both pipelines |
@@ -360,6 +375,9 @@ pytest tests/test_postgres_client.py tests/test_pipeline_dual_write.py -v
 
 # Duplicate-text regression tests
 pytest tests/test_duplicate_text.py -v
+
+# Quality pipeline (consolidation, verification, owner resolution, scoring)
+pytest tests/test_consolidator.py tests/test_verifier.py tests/test_owner_resolver.py tests/test_scoring.py -v
 ```
 
 ### Test with Real Transcripts
@@ -479,6 +497,14 @@ class PipelineResult:
     processing_time_ms: float # Total processing time
     stage_timings: dict       # Per-stage timing breakdown
     merge_results: list[MergeResult]  # Detailed merge outcomes
+    # Quality pipeline metrics
+    pre_consolidation_count: int   # Items before consolidation
+    post_consolidation_count: int  # Items after consolidation
+    items_consolidated: int        # Items removed by consolidation
+    pre_verification_count: int    # Items before verification
+    post_verification_count: int   # Items after verification
+    items_rejected: int            # Items rejected by verifier
+    rejection_reasons: list[dict]  # Why items were rejected
 ```
 
 ### Error Handling
@@ -525,16 +551,22 @@ action-item-graph/
 │   │   ├── topic.py          # ActionItemTopic, ActionItemTopicVersion, ExtractedTopic
 │   │   └── entities.py       # Account, Owner, Contact, etc.
 │   ├── prompts/
-│   │   ├── extract_action_items.py  # Extraction prompts
+│   │   ├── extract_action_items.py  # F-CoT extraction + commitment framework
 │   │   ├── merge_action_items.py    # Merge synthesis prompts
-│   │   └── topic_prompts.py         # Topic resolution prompts
+│   │   ├── topic_prompts.py         # Topic resolution prompts
+│   │   ├── consolidation_prompts.py # Within-batch dedup prompts
+│   │   ├── verification_prompts.py  # LLM-as-Judge verification prompts
+│   │   └── owner_prompts.py         # Role-to-name resolution prompts
 │   ├── pipeline/
-│   │   ├── extractor.py      # Action item extraction
-│   │   ├── matcher.py        # Similarity matching
+│   │   ├── extractor.py      # Action item extraction + priority scoring
+│   │   ├── consolidator.py   # Within-batch dedup (embedding clustering)
+│   │   ├── verifier.py       # LLM-as-Judge adversarial verification
+│   │   ├── owner_resolver.py # Account-scoped owner pre-resolution
+│   │   ├── matcher.py        # Graduated threshold matching
 │   │   ├── merger.py         # Merge decision execution
 │   │   ├── topic_resolver.py # Topic matching logic
 │   │   ├── topic_executor.py # Topic creation/linking
-│   │   └── pipeline.py       # Main orchestrator
+│   │   └── pipeline.py       # Main 10-stage orchestrator
 │   ├── api/                     # Railway FastAPI service
 │   │   ├── main.py              # App with lifespan (Neo4j + OpenAI init)
 │   │   ├── config.py            # Service configuration (pydantic-settings)
@@ -549,6 +581,11 @@ action-item-graph/
 │       └── api_client.py        # Railway API client with retry
 ├── tests/
 │   ├── test_pipeline.py           # AI pipeline end-to-end
+│   ├── test_extractor.py          # F-CoT extraction + scoring
+│   ├── test_consolidator.py       # Within-batch dedup (17 tests)
+│   ├── test_verifier.py           # LLM-as-Judge verification (10 tests)
+│   ├── test_owner_resolver.py     # Owner pre-resolution (29 tests)
+│   ├── test_scoring.py            # Priority scoring + graduated thresholds (17 tests)
 │   ├── test_deal_pipeline.py      # Deal pipeline end-to-end
 │   ├── test_deal_extraction.py    # MEDDIC extraction
 │   ├── test_deal_matcher.py       # Deal entity resolution
@@ -558,7 +595,7 @@ action-item-graph/
 │   ├── test_pipeline_dual_write.py # Dual-write pipeline integration (28 tests)
 │   ├── test_duplicate_text.py     # Duplicate-text regression
 │   ├── test_uuid7.py              # UUIDv7 identity tests
-│   └── ...                        # 24 test files total
+│   └── ...                        # 28 test files, 456 tests total
 ├── examples/
 │   ├── process_transcript.py # Basic usage example
 │   ├── run_transcript_tests.py # Transcript test runner
@@ -584,6 +621,8 @@ action-item-graph/
 │   ├── SMOKE_TEST_GUIDE.md      # Comprehensive smoke test & E2E guide
 │   ├── LIVE_E2E_TEST_RESULTS.md # E2E smoke test validation record
 │   └── test-data-report.md      # Test results report
+├── migrations/
+│   └── 001_add_scoring_columns.sql  # Scoring columns for Postgres (run before deploy)
 ├── ARCHITECTURE.md           # Detailed architecture docs
 ├── REQUIREMENTS.md           # Functional requirements
 ├── CHANGELOG.md              # Version history

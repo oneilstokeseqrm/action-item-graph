@@ -174,8 +174,9 @@ John: Of course. I'll have that ready before our Thursday call.
                 print(f"     Due: {raw.due_date_text or 'Not specified'}")
                 print(f"     Confidence: {ai.confidence:.2f}")
 
-            # Should extract multiple action items (pricing, SOC2, timeline, calendar, etc.)
-            assert result.count >= 5
+            # Should extract high-quality consolidated items (sub-tasks grouped)
+            # The improved prompt consolidates related items (e.g., pricing + SOC2 + whitepaper)
+            assert 3 <= result.count <= 8
 
         finally:
             await client.close()
