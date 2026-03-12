@@ -532,7 +532,9 @@ class PostgresClient:
         """
         UPSERT an Owner into the action_item_owners table.
 
-        Uses owner_id as the conflict target (unique index).
+        Uses (tenant_id, canonical_name) as the conflict target because that
+        is the semantic business key. When Neo4j re-creates an owner node
+        with a new UUID for the same name, we update owner_id to stay in sync.
         """
         sql = text("""
             INSERT INTO action_item_owners (
@@ -542,8 +544,8 @@ class PostgresClient:
                 :id, :tenant_id, :owner_id, :canonical_name,
                 :aliases, :contact_id, :user_id, :created_at
             )
-            ON CONFLICT (owner_id) DO UPDATE SET
-                canonical_name = EXCLUDED.canonical_name,
+            ON CONFLICT (tenant_id, canonical_name) DO UPDATE SET
+                owner_id = EXCLUDED.owner_id,
                 aliases = EXCLUDED.aliases,
                 contact_id = EXCLUDED.contact_id,
                 user_id = EXCLUDED.user_id

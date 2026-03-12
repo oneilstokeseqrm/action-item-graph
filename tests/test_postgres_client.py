@@ -485,6 +485,21 @@ class TestUpsertOwner:
         assert 'John' in aliases
         assert 'J. Smith' in aliases
 
+    @pytest.mark.asyncio
+    async def test_conflict_targets_canonical_name(self, client, mock_engine, sample_owner):
+        """ON CONFLICT must target (tenant_id, canonical_name), not owner_id.
+
+        When Neo4j re-creates an owner with a new UUID for the same name,
+        the upsert should update the existing row rather than violating
+        the (tenant_id, canonical_name) unique constraint.
+        """
+        _, conn = mock_engine
+        await client.upsert_owner(sample_owner)
+
+        sql_text = str(conn.execute.call_args[0][0].text)
+        assert 'ON CONFLICT (tenant_id, canonical_name)' in sql_text
+        assert 'owner_id = EXCLUDED.owner_id' in sql_text
+
 
 class TestLinkActionItemToEntity:
     """Test entity linking INSERT."""
