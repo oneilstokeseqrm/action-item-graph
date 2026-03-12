@@ -758,6 +758,56 @@ class ActionItemRepository:
         result = await self.neo4j.execute_query(query, params)
         return [r['action_item'] for r in result]
 
+    async def get_prioritized_action_items(
+        self,
+        tenant_id: UUID,
+        account_id: str,
+        status: ActionItemStatus | str | None = None,
+        min_priority: float | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """
+        Get ActionItems sorted by priority score (highest first).
+
+        Args:
+            tenant_id: Tenant UUID
+            account_id: Account identifier
+            status: Optional status filter (defaults to 'open')
+            min_priority: Optional minimum priority score threshold
+            limit: Maximum results
+
+        Returns:
+            List of ActionItem node properties, ordered by priority_score DESC
+        """
+        filters = []
+        params: dict[str, Any] = {
+            'tenant_id': str(tenant_id),
+            'account_id': account_id,
+            'limit': limit,
+        }
+
+        if status:
+            filters.append('ai.status = $status')
+            params['status'] = status.value if isinstance(status, ActionItemStatus) else status
+
+        if min_priority is not None:
+            filters.append('ai.priority_score >= $min_priority')
+            params['min_priority'] = min_priority
+
+        where_clause = ' AND '.join(filters)
+        if where_clause:
+            where_clause = 'AND ' + where_clause
+
+        query = f"""
+            MATCH (a:Account {{account_id: $account_id, tenant_id: $tenant_id}})-[:HAS_ACTION_ITEM]->(ai:ActionItem)
+            WHERE ai.tenant_id = $tenant_id {where_clause}
+            RETURN ai {{.*}} as action_item
+            ORDER BY ai.priority_score DESC
+            LIMIT $limit
+        """
+        result = await self.neo4j.execute_query(query, params)
+        return [r['action_item'] for r in result]
+
     async def get_action_item_history(
         self,
         action_item_id: str,

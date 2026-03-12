@@ -140,6 +140,36 @@ class ActionItem(BaseModel):
         default_factory=dict, description='Flexible attributes for extensions'
     )
 
+    # Quality & Scoring (Phase 4: first-class properties)
+    commitment_strength: str | None = Field(
+        default=None,
+        description='How strongly the speaker committed: explicit, conditional, weak, observation',
+    )
+    score_impact: int | None = Field(
+        default=None, ge=1, le=5,
+        description='Business impact (1=trivial, 5=deal-critical)',
+    )
+    score_urgency: int | None = Field(
+        default=None, ge=1, le=5,
+        description='Time sensitivity (1=no rush, 5=blocking/overdue)',
+    )
+    score_specificity: int | None = Field(
+        default=None, ge=1, le=5,
+        description='How actionable (1=vague, 5=crystal clear)',
+    )
+    score_effort: int | None = Field(
+        default=None, ge=1, le=5,
+        description='Estimated effort (1=5 minutes, 5=multi-day project)',
+    )
+    priority_score: float | None = Field(
+        default=None, ge=0.0, le=1.0,
+        description='Weighted priority score (0.0-1.0) combining impact, urgency, specificity, confidence',
+    )
+    definition_of_done: str | None = Field(
+        default=None,
+        description='What proves this action item is complete',
+    )
+
     # Temporal validity (for graph edges)
     valid_at: datetime | None = Field(
         default=None, description='When this version became valid'
@@ -182,6 +212,13 @@ class ActionItem(BaseModel):
             'embedding': self.embedding,
             'embedding_current': self.embedding_current,
             'confidence': self.confidence,
+            'commitment_strength': self.commitment_strength,
+            'score_impact': self.score_impact,
+            'score_urgency': self.score_urgency,
+            'score_specificity': self.score_specificity,
+            'score_effort': self.score_effort,
+            'priority_score': self.priority_score,
+            'definition_of_done': self.definition_of_done,
             'valid_at': self.valid_at.isoformat() if self.valid_at else None,
             'invalid_at': self.invalid_at.isoformat() if self.invalid_at else None,
             'invalidated_by': str(self.invalidated_by) if self.invalidated_by else None,
