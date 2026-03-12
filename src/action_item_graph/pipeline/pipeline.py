@@ -4,12 +4,14 @@ Main pipeline orchestrator for action item extraction and graph management.
 Provides end-to-end processing:
 1. Validate and parse EnvelopeV1 input
 2. Ensure Account exists in graph
-3. Create Interaction node
-4. Extract action items from transcript
-5. Match against existing items (account-scoped)
-6. Execute merge decisions (create/update/link)
-7. Resolve topics for action items (NEW - Topic Grouping)
-8. Return results with created/updated IDs
+3. Extract action items from transcript (F-CoT + commitment framework)
+4. Consolidate near-duplicates within the batch (embedding similarity + LLM)
+5. Verify quality via LLM-as-Judge (adversarial second pass)
+6. Create Interaction node
+7. Match against existing items (account-scoped)
+8. Execute merge decisions (create/update/link)
+9. Resolve topics for action items (Topic Grouping)
+10. Dual-write to Postgres (failure-isolated)
 """
 
 from __future__ import annotations
@@ -36,11 +38,13 @@ from ..models.entities import Interaction, Owner
 from ..models.envelope import EnvelopeV1
 from ..models.topic import ActionItemTopic
 from ..repository import ActionItemRepository
+from .consolidator import ActionItemConsolidator
 from .extractor import ActionItemExtractor, ExtractionOutput
 from .matcher import ActionItemMatcher, MatchResult
 from .merger import ActionItemMerger, MergeResult
 from .topic_executor import TopicExecutionResult, TopicExecutor
 from .topic_resolver import TopicResolver
+from .verifier import ActionItemVerifier
 
 logger = get_logger(__name__)
 
@@ -66,6 +70,15 @@ class PipelineResult:
     total_status_updates: int = 0
     total_matched: int = 0
     total_unmatched: int = 0
+
+    # Consolidation & verification stats (Phase 2: Quality Gates)
+    pre_consolidation_count: int = 0
+    post_consolidation_count: int = 0
+    items_consolidated: int = 0
+    pre_verification_count: int = 0
+    post_verification_count: int = 0
+    items_rejected: int = 0
+    rejection_reasons: list[str] = field(default_factory=list)
 
     # Details for debugging/inspection
     merge_results: list[MergeResult] = field(default_factory=list)
@@ -111,6 +124,12 @@ class PipelineResult:
             'total_status_updates': self.total_status_updates,
             'total_matched': self.total_matched,
             'total_unmatched': self.total_unmatched,
+            'pre_consolidation_count': self.pre_consolidation_count,
+            'post_consolidation_count': self.post_consolidation_count,
+            'items_consolidated': self.items_consolidated,
+            'pre_verification_count': self.pre_verification_count,
+            'post_verification_count': self.post_verification_count,
+            'items_rejected': self.items_rejected,
             'extraction_notes': self.extraction_notes,
             'topics_created': self.topics_created,
             'topics_linked': self.topics_linked,
@@ -160,6 +179,8 @@ class ActionItemPipeline:
 
         # Initialize pipeline components
         self.extractor = ActionItemExtractor(openai_client)
+        self.consolidator = ActionItemConsolidator(openai_client)
+        self.verifier = ActionItemVerifier(openai_client)
         self.matcher = ActionItemMatcher(neo4j_client, openai_client)
         self.merger = ActionItemMerger(neo4j_client, openai_client)
         self.repository = ActionItemRepository(neo4j_client)
@@ -215,11 +236,13 @@ class ActionItemPipeline:
         Steps:
         1. Validate envelope has required fields
         2. Ensure Account exists in graph
-        3. Create Interaction node from envelope
-        4. Extract action items from transcript
-        5. Match extractions against existing items (account-scoped)
-        6. Execute merge decisions for each extraction
-        7. Return comprehensive result
+        3. Extract action items from transcript (F-CoT + commitment framework)
+        4. Consolidate near-duplicates within the batch
+        5. Verify quality via LLM-as-Judge
+        6. Create Interaction node in graph
+        7. Match extractions against existing items (account-scoped)
+        8. Execute merge decisions for each extraction
+        9. Return comprehensive result
 
         Args:
             envelope: EnvelopeV1 with transcript content
@@ -300,11 +323,38 @@ class ActionItemPipeline:
                     logger.info("pipeline_complete_no_items", **timer.summary())
                     return result
 
-                # Step 3: Create Interaction node in graph
+                # Step 3: Consolidate near-duplicates within the batch
+                with timer.stage("consolidation"):
+                    result.pre_consolidation_count = extraction.count
+                    extraction, items_consolidated = await self.consolidator.consolidate(
+                        extraction,
+                    )
+                    result.post_consolidation_count = extraction.count
+                    result.items_consolidated = items_consolidated
+
+                # Step 4: Verify quality via LLM-as-Judge
+                with timer.stage("verification"):
+                    result.pre_verification_count = extraction.count
+                    extraction, items_rejected, rejection_reasons = (
+                        await self.verifier.verify_batch(extraction)
+                    )
+                    result.post_verification_count = extraction.count
+                    result.items_rejected = items_rejected
+                    result.rejection_reasons = rejection_reasons
+
+                # Re-check after quality gates — consolidation/verification may have removed all items
+                if extraction.count == 0:
+                    result.completed_at = datetime.now()
+                    result.processing_time_ms = int(timer.total_ms)
+                    result.stage_timings = timer.stages.copy()
+                    logger.info("pipeline_complete_all_filtered", **timer.summary())
+                    return result
+
+                # Step 5: Create Interaction node in graph
                 with timer.stage("create_interaction"):
                     await self.repository.create_interaction(extraction.interaction)
 
-                # Step 4: Match against existing items (account-scoped)
+                # Step 6: Match against existing items (account-scoped)
                 with timer.stage("matching"):
                     match_results, filtered_action_items = await self._match_extractions(
                         extraction=extraction,
@@ -321,7 +371,7 @@ class ActionItemPipeline:
                     total_unmatched=result.total_unmatched,
                 )
 
-                # Step 5: Execute merge decisions
+                # Step 7: Execute merge decisions
                 with timer.stage("merging"):
                     merge_results = await self._execute_merges(
                         match_results=match_results,
@@ -329,7 +379,7 @@ class ActionItemPipeline:
                         interaction=extraction.interaction,
                     )
 
-                # Step 6: Topic Resolution (Phase 7: Topic Grouping)
+                # Step 8: Topic Resolution (Phase 7: Topic Grouping)
                 if self.enable_topics:
                     with timer.stage("topic_resolution"):
                         topic_exec_results = await self._process_topics(
@@ -348,7 +398,7 @@ class ActionItemPipeline:
                         topics_linked=result.topics_linked,
                     )
 
-                # Step 7: Dual-write to Postgres (failure-isolated)
+                # Step 9: Dual-write to Postgres (failure-isolated)
                 if self.postgres is not None:
                     with timer.stage("postgres_dual_write"):
                         await self._dual_write_postgres(
@@ -477,6 +527,33 @@ class ActionItemPipeline:
                 result.processing_time_ms = int(timer.total_ms)
                 result.stage_timings = timer.stages.copy()
                 logger.info("process_text_complete_no_items", **timer.summary())
+                return result
+
+            # Consolidate near-duplicates within the batch
+            with timer.stage("consolidation"):
+                result.pre_consolidation_count = extraction.count
+                extraction, items_consolidated = await self.consolidator.consolidate(
+                    extraction,
+                )
+                result.post_consolidation_count = extraction.count
+                result.items_consolidated = items_consolidated
+
+            # Verify quality via LLM-as-Judge
+            with timer.stage("verification"):
+                result.pre_verification_count = extraction.count
+                extraction, items_rejected, rejection_reasons = (
+                    await self.verifier.verify_batch(extraction)
+                )
+                result.post_verification_count = extraction.count
+                result.items_rejected = items_rejected
+                result.rejection_reasons = rejection_reasons
+
+            # Re-check after quality gates
+            if extraction.count == 0:
+                result.completed_at = datetime.now()
+                result.processing_time_ms = int(timer.total_ms)
+                result.stage_timings = timer.stages.copy()
+                logger.info("process_text_complete_all_filtered", **timer.summary())
                 return result
 
             # Create Interaction in graph
