@@ -118,6 +118,14 @@ class ActionItemExtractor:
             pg_user_id=envelope.pg_user_id,
         )
 
+        # Auto-resolve recording user's owner name to canonical form
+        user_name = envelope.extras.get('user_name') if envelope.extras else None
+        if user_name:
+            for action_item, raw in zip(action_items, extraction_result.action_items):
+                if raw.is_user_owned and action_item.owner != user_name:
+                    action_item.owner = user_name
+                    action_item.owner_type = 'named'
+
         # Update interaction with count
         interaction.action_item_count = len(action_items)
         interaction.processed_at = datetime.now(tz=None)
@@ -285,6 +293,15 @@ class ActionItemExtractor:
                 embedding=embedding,
                 embedding_current=embedding,  # Same as original initially
                 confidence=extraction.confidence,
+                attributes={
+                    'commitment_strength': extraction.commitment_strength,
+                    'decision_context': extraction.decision_context,
+                    'definition_of_done': extraction.definition_of_done,
+                    'score_impact': extraction.score_impact,
+                    'score_urgency': extraction.score_urgency,
+                    'score_specificity': extraction.score_specificity,
+                    'score_effort': extraction.score_effort,
+                },
             )
 
             # TODO: Parse due_date_text into actual datetime
