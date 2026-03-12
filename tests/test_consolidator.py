@@ -173,6 +173,41 @@ class TestClustering:
         clusters_low = _cluster_items([emb_a, emb_b], threshold=0.9)
         assert len(clusters_low) == 1
 
+    def test_no_chaining(self):
+        """Complete-linkage prevents transitive chaining.
+
+        With single-linkage, A~B and B~C would chain into {A,B,C}
+        even when A≁C. Complete-linkage requires ALL pairwise similarities
+        to meet the threshold.
+        """
+        # A and B are similar (both near [1,0.3,0])
+        emb_a = _make_embedding([1.0, 0.0, 0.0])
+        # B bridges A and C — similar to both
+        emb_b = _make_embedding([0.6, 0.0, 0.6])
+        # C is far from A (near [0,0,1])
+        emb_c = _make_embedding([0.0, 0.0, 1.0])
+
+        # Use a threshold where A~B and B~C but NOT A~C
+        # cosine(A,B) and cosine(B,C) should be moderate, cosine(A,C) should be low
+        sim_ab = _cosine_similarity(emb_a, emb_b)
+        sim_bc = _cosine_similarity(emb_b, emb_c)
+        sim_ac = _cosine_similarity(emb_a, emb_c)
+
+        # Find a threshold where A~B and B~C both pass but A~C doesn't
+        threshold = min(sim_ab, sim_bc) - 0.01
+        assert sim_ac < threshold, (
+            f"Test setup error: A~C ({sim_ac:.3f}) should be below threshold ({threshold:.3f})"
+        )
+
+        clusters = _cluster_items([emb_a, emb_b, emb_c], threshold=threshold)
+
+        # With complete-linkage, A and C should NOT be in the same cluster
+        for cluster in clusters:
+            assert not ({0, 2} <= set(cluster)), (
+                f"Chaining detected: items 0 (A) and 2 (C) are in the same cluster {cluster}, "
+                f"but A~C similarity ({sim_ac:.3f}) is below threshold ({threshold:.3f})"
+            )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Consolidator integration tests (mocked LLM)

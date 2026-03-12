@@ -895,6 +895,7 @@ class ActionItemPipeline:
                 if owner_name:
                     owner_node = await self.repository.get_owner_by_name(
                         action_item.tenant_id, owner_name,
+                        account_id=action_item.account_id,
                     )
                     if owner_node:
                         owner = Owner(

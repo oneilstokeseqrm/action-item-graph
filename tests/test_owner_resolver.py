@@ -15,7 +15,7 @@ from action_item_graph.pipeline.owner_resolver import (
     FUZZY_MATCH_THRESHOLD,
     OwnerCache,
     OwnerPreResolver,
-    _char_overlap_ratio,
+    _name_similarity,
     _normalize_name,
     _word_boundary_match,
 )
@@ -104,24 +104,41 @@ class TestWordBoundaryMatch:
         assert _word_boundary_match('John', 'Sarah Smith') is False
 
 
-class TestCharOverlapRatio:
-    """Test character overlap ratio."""
+class TestNameSimilarity:
+    """Test sequence-based name similarity."""
 
     def test_identical_strings(self):
-        assert _char_overlap_ratio('oneill', 'oneill') == 1.0
+        assert _name_similarity('oneill', 'oneill') == 1.0
 
     def test_similar_strings(self):
         # O'Neill vs O'Neil — very similar
-        ratio = _char_overlap_ratio("o'neill", "o'neil")
+        ratio = _name_similarity("o'neill", "o'neil")
         assert ratio >= 0.85
 
     def test_different_strings(self):
-        ratio = _char_overlap_ratio('sarah', 'john')
+        ratio = _name_similarity('sarah', 'john')
         assert ratio < 0.5
 
     def test_empty_strings(self):
-        assert _char_overlap_ratio('', 'test') == 0.0
-        assert _char_overlap_ratio('test', '') == 0.0
+        assert _name_similarity('', 'test') == 0.0
+        assert _name_similarity('test', '') == 0.0
+
+    def test_anagram_no_false_match(self):
+        """'Sarah' and 'Harsh' share the same character SET but are different names.
+
+        The old set-based char overlap would return ~1.0 for these.
+        Sequence-based similarity correctly sees they are different.
+        """
+        ratio = _name_similarity('sarah', 'harsh')
+        assert ratio < FUZZY_MATCH_THRESHOLD, (
+            f"Anagram 'sarah'/'harsh' should NOT match (ratio={ratio:.2f}, "
+            f"threshold={FUZZY_MATCH_THRESHOLD})"
+        )
+
+    def test_transposition_no_false_match(self):
+        """Names that are anagram-like should not falsely match."""
+        ratio = _name_similarity('clara', 'carol')
+        assert ratio < FUZZY_MATCH_THRESHOLD
 
 
 # ─────────────────────────────────────────────────────────────────────────────

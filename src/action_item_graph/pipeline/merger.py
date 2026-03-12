@@ -187,10 +187,11 @@ class ActionItemMerger:
             tenant_id=action_item.tenant_id,
         )
 
-        # Resolve and link owner
+        # Resolve and link owner (scoped to account for substring matching)
         owner = await self.repository.resolve_or_create_owner(
             tenant_id=action_item.tenant_id,
             owner_name=action_item.owner,
+            account_id=action_item.account_id,
         )
         await self.repository.link_to_owner(
             action_item_id=str(action_item.id),
@@ -368,11 +369,12 @@ class ActionItemMerger:
             tenant_id=tenant_id,
         )
 
-        # Update owner link if changed
+        # Update owner link if changed (scoped to account for substring matching)
         if merged.owner != existing_props.get('owner'):
             owner = await self.repository.resolve_or_create_owner(
                 tenant_id=tenant_id,
                 owner_name=merged.owner,
+                account_id=action_item.account_id,
             )
             await self.repository.link_to_owner(
                 action_item_id=existing_id,

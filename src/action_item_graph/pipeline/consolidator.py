@@ -45,8 +45,9 @@ def _cluster_items(
     """
     Cluster item indices by pairwise cosine similarity.
 
-    Uses single-linkage clustering: if item A is similar to B and B to C,
-    they all end up in the same cluster even if A and C aren't directly similar.
+    Uses complete-linkage clustering: an item joins a cluster only if it meets
+    the similarity threshold with ALL existing members. This prevents chaining
+    (where A~B and B~C would pull A and C together even if A≁C).
 
     Returns:
         List of clusters, where each cluster is a list of indices.
@@ -56,34 +57,29 @@ def _cluster_items(
     if n == 0:
         return []
 
-    # Union-Find for clustering
-    parent = list(range(n))
-
-    def find(x: int) -> int:
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    def union(x: int, y: int) -> None:
-        px, py = find(x), find(y)
-        if px != py:
-            parent[px] = py
-
-    # Check all pairs
+    # Pre-compute pairwise similarity matrix
+    sim_matrix: list[list[float]] = [[0.0] * n for _ in range(n)]
     for i in range(n):
+        sim_matrix[i][i] = 1.0
         for j in range(i + 1, n):
             sim = _cosine_similarity(embeddings[i], embeddings[j])
-            if sim >= threshold:
-                union(i, j)
+            sim_matrix[i][j] = sim
+            sim_matrix[j][i] = sim
 
-    # Build clusters
-    clusters: dict[int, list[int]] = {}
+    # Greedy complete-linkage: each item joins the first cluster where it
+    # meets the threshold with ALL existing members, or starts a new cluster.
+    clusters: list[list[int]] = []
     for i in range(n):
-        root = find(i)
-        clusters.setdefault(root, []).append(i)
+        placed = False
+        for cluster in clusters:
+            if all(sim_matrix[i][j] >= threshold for j in cluster):
+                cluster.append(i)
+                placed = True
+                break
+        if not placed:
+            clusters.append([i])
 
-    return list(clusters.values())
+    return clusters
 
 
 class ActionItemConsolidator:

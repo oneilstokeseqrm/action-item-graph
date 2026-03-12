@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from difflib import SequenceMatcher
 
 from ..clients.openai_client import OpenAIClient
 from ..logging import get_logger
@@ -61,18 +62,19 @@ def _word_boundary_match(short: str, long: str) -> bool:
     return bool(re.search(pattern, long, re.IGNORECASE))
 
 
-def _char_overlap_ratio(a: str, b: str) -> float:
+def _name_similarity(a: str, b: str) -> float:
     """
-    Compute character overlap ratio between two normalized strings.
+    Compute sequence-based similarity between two normalized name strings.
+
+    Uses SequenceMatcher which respects character order and frequency,
+    unlike set-based overlap which would falsely match anagrams
+    (e.g., "Sarah" vs "Harsh" share the same character set but are different names).
 
     Used for fuzzy matching of name variants (O'Neill ↔ O'Neil).
     """
     if not a or not b:
         return 0.0
-    set_a = set(a)
-    set_b = set(b)
-    intersection = set_a & set_b
-    return len(intersection) / max(len(set_a), len(set_b))
+    return SequenceMatcher(None, a, b).ratio()
 
 
 class OwnerCache:
@@ -128,9 +130,9 @@ class OwnerCache:
                 if _word_boundary_match(canon_norm, normalized):
                     return owner_node['canonical_name'], 'substring'
 
-        # 4. Fuzzy variant match (O'Neill ↔ O'Neil, 80%+ char overlap)
+        # 4. Fuzzy variant match (O'Neill ↔ O'Neil, 80%+ sequence similarity)
         for canon_norm, owner_node in self._by_canonical.items():
-            ratio = _char_overlap_ratio(normalized, canon_norm)
+            ratio = _name_similarity(normalized, canon_norm)
             if ratio >= FUZZY_MATCH_THRESHOLD and len(normalized) > 3:
                 return owner_node['canonical_name'], 'fuzzy'
 
