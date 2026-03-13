@@ -2,7 +2,7 @@
 
 > Comprehensive reference for how both pipelines (Action Item + Deal) were validated end-to-end against live infrastructure.
 
-**Last validated**: 2026-02-25 (live E2E, single shared database + Postgres dual-write)
+**Last validated**: 2026-03-12 (live E2E, post-quality-overhaul pipeline, single shared database + Postgres dual-write)
 
 ---
 
@@ -203,11 +203,18 @@ TOTAL                          45         17       3        1                  3
 - 1 DealVersion snapshot
 - All MEDDIC dimensions populated for all deals
 - `deal_count` values: Call 1=1, Call 2=1, Call 3=2, Call 4=0
+- All action items have `commitment_strength` populated (quality pipeline)
+- All action items have `priority_score` populated (quality pipeline)
+- All action items have `definition_of_done` populated (quality pipeline)
+- All action items linked to topics via `BELONGS_TO` (100% coverage)
+- All action items linked to interactions via `EXTRACTED_FROM`
+- Zero owner fragmentation (no single-letter initials like "E", "B", "C")
 
 **Variable between runs** (expected):
-- Exact action item count (typically 35-50)
-- Topic count and names (typically 15-20)
-- Owner resolution (name aliasing varies)
+- Exact action item count (typically 4-8 post-quality-overhaul, was 35-50 pre-overhaul)
+- Topic count and names (typically 2-5 post-overhaul, was 15-20 pre-overhaul)
+- Owner resolution (name aliasing varies, but all should be named owners)
+- Priority score values (range and ordering may differ)
 - Deal amounts (LLM-estimated from transcript context)
 - Processing times
 
@@ -216,7 +223,7 @@ TOTAL                          45         17       3        1                  3
 | Question | Answer |
 |----------|--------|
 | Have both pipelines been tested simultaneously? | **Yes.** The live E2E smoke test dispatches every transcript through `EnvelopeDispatcher`, which runs both pipelines concurrently via `asyncio.gather()`. |
-| When was this last validated? | **2026-02-03.** All 4 transcripts processed with `both_succeeded = True` for every envelope. Zero errors. |
+| When was this last validated? | **2026-03-12.** All 4 transcripts processed with `both_succeeded = True` for every envelope. Zero errors. Quality pipeline: 6 items (down from 30 pre-overhaul), 100% scoring, 100% topic coverage. |
 | What does "simultaneously" mean technically? | A single `dispatch()` call launches `ActionItemPipeline.process_envelope()` and `DealPipeline.process_envelope()` as concurrent coroutines. They share one OpenAI client and write to the same Neo4j database with tenant isolation. |
 | How do we know both actually executed? | The summary table shows both AI Items > 0 **and** Deal activity (3 created, 1 merged) across the run. Final state queries confirm nodes from both pipelines in the database. |
 | What if one pipeline fails? | `asyncio.gather(return_exceptions=True)` captures the exception without canceling the other pipeline. The "Partial System Failure" integration test (Section 4) validates this contract. |

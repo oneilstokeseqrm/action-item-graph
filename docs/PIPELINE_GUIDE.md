@@ -842,6 +842,8 @@ Both pipelines optionally dual-write to Neon Postgres when `NEON_DATABASE_URL` i
 
 The ActionItemPipeline writes action items, versions, topics, topic memberships, and owners to Postgres after Neo4j persistence. See [ARCHITECTURE.md](../ARCHITECTURE.md) for table mappings.
 
+**Owner upsert pattern**: The `action_item_owners` table uses `ON CONFLICT (tenant_id, canonical_name)` as the upsert conflict target because `(tenant_id, canonical_name)` is the semantic business key. When Neo4j re-creates an owner node with a new UUID for the same canonical name (e.g., during re-processing), the Postgres upsert updates `owner_id` to stay in sync rather than violating the unique constraint.
+
 ### Deal Dual-Write
 
 The DealPipeline optionally dual-writes to Postgres using the same failure-isolation pattern:
