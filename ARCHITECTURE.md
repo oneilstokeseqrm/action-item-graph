@@ -683,10 +683,10 @@ Key features:
 
 ### Consolidation (Stage 3)
 
-Within-batch deduplication using embedding cosine similarity with Union-Find clustering.
+Within-batch deduplication using embedding cosine similarity with complete-linkage clustering.
 
 - **Threshold**: 0.80 (higher than cross-interaction 0.65 to only catch near-duplicates)
-- Clusters items with overlapping semantic meaning
+- **Complete-linkage**: An item joins a cluster only if it meets the threshold with ALL existing members (prevents transitive chaining where A~B and B~C would pull A and C together even if A≁C)
 - LLM selects the best representative from each cluster, merging context
 - **Fail-open**: On LLM failure, keeps first item in cluster
 
@@ -708,7 +708,7 @@ Resolution cascade:
 1. Exact match against known owners
 2. Case-insensitive alias match
 3. Substring match (word-boundary aware — "Peter" won't match "Peterson")
-4. Fuzzy variant match (apostrophe normalization: O'Neill ↔ O'Neil, 80%+ character overlap)
+4. Fuzzy variant match (SequenceMatcher-based similarity: O'Neill ↔ O'Neil, 80%+ sequence ratio)
 5. LLM role-to-name resolution for `role_inferred` owners (e.g., "the account manager" → "Peter O'Neill")
 
 ### Priority Scoring (Stage 9)
@@ -723,12 +723,17 @@ Persisted as first-class properties on both Neo4j ActionItem nodes and Postgres 
 
 ### Quality Impact
 
-| Metric | Before | After |
-|--------|--------|-------|
-| Avg items/interaction | 5.1 | 2-3 |
-| Intra-batch duplicates | ~30-40% | <5% |
-| Unconfirmed owners | 30% | <10% |
+Measured against the same 4 Lightbox transcripts (live E2E, 2026-03-12):
+
+| Metric | Before (2026-02-11) | After (2026-03-12) |
+|--------|---------------------|---------------------|
+| Total items (4 transcripts) | 30 | 6 |
+| Avg items/interaction | 7.5 | 1.5 |
+| Intra-batch duplicates | ~30-40% | 0% |
+| Unconfirmed owners | 30% (single-letter initials) | 0% (all named, canonical) |
 | Items with priority scoring | 0% | 100% |
+| Items with definition of done | 0% | 100% |
+| Topic coverage | 100% (16 topics) | 100% (3 topics) |
 | LLM calls/interaction | ~13 | ~5-6 |
 
 ---
@@ -818,7 +823,7 @@ This enables:
 - [Graph Integration Proposal](./docs/GRAPH_INTEGRATION_PROPOSAL.md) — Feasibility analysis for single-database architecture, concurrency safety proofs
 - [Smoke Test Guide](./docs/SMOKE_TEST_GUIDE.md) — E2E validation procedures and historical results
 - [Live E2E Test Results](./docs/LIVE_E2E_TEST_RESULTS.md) — Most recent live run validation record
-- [Event Consumer Design](./docs/plans/2026-02-22-event-consumer-design.md) — EventBridge → SQS → Lambda → Railway architecture design
+- [Event Consumer Architecture](./docs/EVENT_CONSUMER_ARCHITECTURE.md) — EventBridge → SQS → Lambda → Railway ingestion pattern
 - [Pipeline Guide](./docs/PIPELINE_GUIDE.md) — Comprehensive pipeline usage guide
 - [Topic Grouping](./docs/PHASE7_TOPIC_GROUPING.md) — Topic feature documentation
 - [API Reference](./docs/API.md) — API reference

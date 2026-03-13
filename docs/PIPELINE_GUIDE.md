@@ -163,7 +163,7 @@ Both action items and topics have LLM-generated summaries that evolve:
 ┌─────────────────────────────────────────────────────────────────┐
 │ 3. CONSOLIDATION (ActionItemConsolidator)                        │
 │    - Within-batch dedup using embedding cosine similarity         │
-│    - Union-Find clustering at 0.80 threshold                     │
+│    - Complete-linkage clustering at 0.80 threshold                     │
 │    - LLM selects best representative per cluster, merges context │
 │    - Fail-open: LLM errors keep first item in cluster            │
 └─────────────────────────────────────────────────────────────────┘
@@ -448,7 +448,7 @@ class ExtractedTopic(BaseModel):
 
 **Algorithm**:
 1. Compute pairwise cosine similarity from embeddings already generated during extraction
-2. Cluster items above `INTRA_BATCH_SIMILARITY = 0.80` using Union-Find
+2. Cluster items above `INTRA_BATCH_SIMILARITY = 0.80` using complete-linkage
 3. For each 2+ item cluster, LLM selects the best representative and merges context
 4. **Fail-open**: On LLM failure, keeps first item in cluster
 
@@ -471,7 +471,7 @@ Resolution cascade:
 1. Exact match against known Owner nodes
 2. Case-insensitive alias match
 3. Substring match (word-boundary aware — prevents "Peter" matching "Peterson")
-4. Fuzzy variant match (apostrophe normalization, 80%+ character overlap)
+4. Fuzzy variant match (apostrophe normalization, 80%+ SequenceMatcher ratio)
 5. LLM role-to-name resolution for `role_inferred` owners
 
 ### ActionItemMatcher
