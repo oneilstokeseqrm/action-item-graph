@@ -31,6 +31,11 @@ from ..repository import DealRepository
 from .extractor import DealExtractor
 from .matcher import DealMatcher
 from .merger import DealMergeResult, DealMerger
+from shared.contact_ops import (
+    enrich_engaged_on_role,
+    match_name_to_contact,
+    merge_contacts_to_deal,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -296,6 +301,23 @@ class DealPipeline:
         result.stage_timings['ensure_interaction'] = time.monotonic() - t_stage
 
         # ------------------------------------------------------------------
+        # Step 2b: MERGE base Contact→Deal ENGAGED_ON (Case A — targeted)
+        # ------------------------------------------------------------------
+        if opportunity_id and envelope.contacts:
+            try:
+                contact_ids = [
+                    c['contact_id'] for c in envelope.contacts
+                    if c.get('contact_id')
+                ]
+                await merge_contacts_to_deal(
+                    self.repository.neo4j, str(tenant_id), contact_ids,
+                    opportunity_id,
+                    source='deal_pipeline',
+                )
+            except Exception:
+                log.warning('deal_pipeline.engaged_on_base_failed', exc_info=True)
+
+        # ------------------------------------------------------------------
         # Step 3: For Case A, fetch existing deal context
         # ------------------------------------------------------------------
         existing_deal: dict[str, Any] | None = None
@@ -396,6 +418,52 @@ class DealPipeline:
                     action=merge_result.action,
                     opportunity_id=merge_result.opportunity_id,
                 )
+
+                # Step 5d: ENGAGED_ON — base + role enrichment
+                opp_id = merge_result.opportunity_id
+                if envelope.contacts and opp_id:
+                    try:
+                        # For discovery deals, base ENGAGED_ON wasn't created
+                        # in Step 2b (no upfront opportunity_id). MERGE here.
+                        if not opportunity_id:
+                            cids = [
+                                c['contact_id'] for c in envelope.contacts
+                                if c.get('contact_id')
+                            ]
+                            await merge_contacts_to_deal(
+                                self.repository.neo4j, str(tenant_id), cids,
+                                opp_id, source='deal_pipeline',
+                            )
+
+                        # Enrich ENGAGED_ON with champion/economic_buyer roles
+                        deal_node = await self.repository.get_deal(
+                            tenant_id=tenant_id,
+                            opportunity_id=opp_id,
+                        )
+                        if deal_node:
+                            for field_name, role_label in [
+                                ('meddic_champion', 'champion'),
+                                ('meddic_economic_buyer', 'economic_buyer'),
+                            ]:
+                                role_name = deal_node.get(field_name)
+                                if role_name:
+                                    matched = match_name_to_contact(
+                                        role_name, envelope.contacts,
+                                    )
+                                    if matched:
+                                        await enrich_engaged_on_role(
+                                            self.repository.neo4j,
+                                            str(tenant_id),
+                                            matched['contact_id'],
+                                            opp_id,
+                                            role_label,
+                                            0.9,
+                                        )
+                    except Exception:
+                        deal_log.warning(
+                            'deal_pipeline.engaged_on_enrich_failed',
+                            exc_info=True,
+                        )
 
             except Exception as exc:
                 # Per-deal errors are accumulated, not fatal

@@ -44,6 +44,7 @@ from .owner_resolver import OwnerPreResolver
 from .matcher import ActionItemMatcher, MatchResult
 from .merger import ActionItemMerger, MergeResult
 from .topic_executor import TopicExecutionResult, TopicExecutor
+from shared.contact_ops import merge_contacts_to_deal
 from .topic_resolver import TopicResolver
 from .verifier import ActionItemVerifier
 
@@ -372,6 +373,23 @@ class ActionItemPipeline:
                 # Step 6: Create Interaction node in graph
                 with timer.stage("create_interaction"):
                     await self.repository.create_interaction(extraction.interaction)
+
+                # MERGE base Contact→Deal ENGAGED_ON (MERGE-everywhere)
+                if envelope.opportunity_id and envelope.contacts:
+                    try:
+                        contact_ids = [
+                            c['contact_id'] for c in envelope.contacts
+                            if c.get('contact_id')
+                        ]
+                        await merge_contacts_to_deal(
+                            self.neo4j, str(tenant_id), contact_ids,
+                            envelope.opportunity_id,
+                            source='action_item_pipeline',
+                        )
+                    except Exception:
+                        logger.warning(
+                            'pipeline.engaged_on_base_failed', exc_info=True,
+                        )
 
                 # Step 7: Match against existing items (account-scoped)
                 with timer.stage("matching"):
