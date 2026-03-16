@@ -356,8 +356,18 @@ class ActionItemPipeline:
                     owner_resolver = OwnerPreResolver(
                         self.repository, self.openai,
                     )
-                    await owner_resolver.load_cache(tenant_id, account_id)
+                    await owner_resolver.load_cache(
+                        tenant_id, account_id,
+                        contacts=envelope.contacts,
+                    )
                     await owner_resolver.resolve_batch(extraction.action_items)
+
+                # Build contact_map for downstream owner→contact linking
+                contact_map: dict[str, str] = {}
+                for ai in extraction.action_items:
+                    cid = owner_resolver.get_contact_id(ai.owner)
+                    if cid:
+                        contact_map[ai.owner] = cid
 
                 # Step 6: Create Interaction node in graph
                 with timer.stage("create_interaction"):
@@ -386,6 +396,7 @@ class ActionItemPipeline:
                         match_results=match_results,
                         action_items=filtered_action_items,
                         interaction=extraction.interaction,
+                        contact_map=contact_map,
                     )
 
                 # Step 9: Topic Resolution (Phase 7: Topic Grouping)
@@ -689,6 +700,7 @@ class ActionItemPipeline:
         match_results: list[MatchResult],
         action_items: list[ActionItem],
         interaction: Interaction,
+        contact_map: dict[str, str] | None = None,
     ) -> list[MergeResult]:
         """
         Execute merge decisions for all match results.
@@ -702,6 +714,7 @@ class ActionItemPipeline:
             match_results: Results from matching phase
             action_items: Filtered ActionItem objects (1:1 with match_results)
             interaction: The Interaction for this processing run
+            contact_map: Optional owner_name → contact_id map from contact enrichment
 
         Returns:
             List of MergeResult objects (1:1 with inputs)
@@ -709,10 +722,12 @@ class ActionItemPipeline:
         merge_results = []
 
         for match_result, action_item in zip(match_results, action_items):
+            contact_id = (contact_map or {}).get(action_item.owner)
             merge_result = await self.merger.execute_decision(
                 match_result=match_result,
                 interaction=interaction,
                 action_item=action_item,
+                contact_id=contact_id,
             )
 
             merge_results.append(merge_result)
@@ -942,6 +957,22 @@ class ActionItemPipeline:
                         'postgres_dual_write.link_interaction_failed',
                         action_item_id=merge_result.action_item_id,
                     )
+
+                # Link to contact if owner matched an envelope contact
+                contact_id = merge_result.details.get('contact_id')
+                if contact_id:
+                    try:
+                        await self.postgres.link_action_item_to_entity(
+                            tenant_id=pg_item.tenant_id,
+                            action_item_id=item_id,
+                            entity_type='contact',
+                            entity_id=contact_id,
+                        )
+                    except Exception:
+                        logger.exception(
+                            'postgres_dual_write.link_contact_failed',
+                            action_item_id=merge_result.action_item_id,
+                        )
 
             except Exception:
                 logger.exception(

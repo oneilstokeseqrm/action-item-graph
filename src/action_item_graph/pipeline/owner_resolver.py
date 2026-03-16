@@ -88,6 +88,7 @@ class OwnerCache:
         self._by_canonical: dict[str, dict] = {}  # normalized_name -> owner_node
         self._by_alias: dict[str, dict] = {}  # normalized_alias -> owner_node
         self._all_owners: list[dict] = []
+        self._contact_by_canonical: dict[str, str] = {}  # normalized_name -> contact_id
 
     def add(self, owner_node: dict) -> None:
         """Add an owner to the cache."""
@@ -147,6 +148,35 @@ class OwnerCache:
     def is_empty(self) -> bool:
         return len(self._all_owners) == 0
 
+    def add_contact(self, contact: dict) -> None:
+        """Seed cache with a contact from envelope metadata.
+
+        Creates a synthetic owner_node so existing resolve() logic works unchanged.
+        Only seeds if no existing owner already claims this name.
+        Always records the contact_id mapping for downstream use.
+        """
+        name = (contact.get('name') or '').strip()
+        contact_id = contact.get('contact_id', '')
+        if not name or not contact_id:
+            return
+        normalized = _normalize_name(name)
+        # Only seed if no existing owner claims this name
+        if normalized not in self._by_canonical:
+            synthetic_node = {
+                'owner_id': None,
+                'canonical_name': name,
+                'aliases': [],
+                'contact_id': contact_id,
+            }
+            self._by_canonical[normalized] = synthetic_node
+            self._all_owners.append(synthetic_node)
+        # Always record contact_id mapping (even for existing owners)
+        self._contact_by_canonical[normalized] = contact_id
+
+    def get_contact_id(self, name: str) -> str | None:
+        """Return contact_id for a resolved name, if seeded from contacts."""
+        return self._contact_by_canonical.get(_normalize_name(name))
+
 
 class OwnerPreResolver:
     """
@@ -172,16 +202,18 @@ class OwnerPreResolver:
         self,
         tenant_id,
         account_id: str,
+        contacts: list[dict] | None = None,
     ) -> int:
         """
-        Populate the owner cache from the graph database.
+        Populate the owner cache from the graph database and envelope contacts.
 
         Args:
             tenant_id: Tenant UUID
             account_id: Account identifier
+            contacts: Optional list of contact dicts from envelope extras
 
         Returns:
-            Number of owners loaded into cache
+            Number of owners loaded from the graph
         """
         owners = await self.repository.get_owners_for_account(
             tenant_id=tenant_id,
@@ -191,13 +223,25 @@ class OwnerPreResolver:
         for owner_node in owners:
             self._cache.add(owner_node)
 
+        # Seed with contacts from envelope (after owners, so owners take priority)
+        contacts_seeded = 0
+        if contacts:
+            for contact in contacts:
+                self._cache.add_contact(contact)
+                contacts_seeded += 1
+
         logger.info(
             'owner_cache_loaded',
             count=len(owners),
+            contacts_seeded=contacts_seeded,
             account_id=account_id,
         )
 
         return len(owners)
+
+    def get_contact_id(self, owner_name: str) -> str | None:
+        """Return contact_id for a resolved owner name, if from envelope contacts."""
+        return self._cache.get_contact_id(owner_name)
 
     async def resolve_batch(
         self,
