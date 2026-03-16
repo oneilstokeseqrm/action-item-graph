@@ -64,6 +64,9 @@ class DealExtractor:
         content_text = envelope.content.text
         opportunity_id = envelope.opportunity_id
 
+        # Use rich contact labels if available for LLM context
+        participants = envelope.contact_labels if envelope.contacts else None
+
         log = logger.bind(
             tenant_id=str(envelope.tenant_id),
             interaction_id=str(envelope.interaction_id) if envelope.interaction_id else None,
@@ -77,12 +80,14 @@ class DealExtractor:
                 existing_deal=existing_deal,
                 account_name=existing_deal.get('account_name'),
                 meeting_title=envelope.meeting_title,
+                participants=participants,
             )
         else:
             log.info('deal_extraction.discovery', mode='case_b')
             result = await self._extract_discovery(
                 content_text=content_text,
                 meeting_title=envelope.meeting_title,
+                participants=participants,
             )
 
         # Generate embeddings for extracted deals

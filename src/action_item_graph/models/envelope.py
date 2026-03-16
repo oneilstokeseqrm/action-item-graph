@@ -124,6 +124,22 @@ class EnvelopeV1(BaseModel):
         return [c.get('name') or c.get('email', 'Unknown') for c in self.contacts]
 
     @property
+    def contact_labels(self) -> list[str]:
+        """Rich formatted labels for LLM prompts: 'Jane Smith <jane@acme.com> (organizer)'."""
+        labels = []
+        for c in self.contacts:
+            name = c.get('name') or c.get('email')
+            email = c.get('email', '')
+            role = c.get('role', '')
+            if c.get('name') and email:
+                labels.append(f"{name} <{email}> ({role})")
+            elif c.get('name'):
+                labels.append(f"{name} ({role})")
+            else:
+                labels.append(f"{email} ({role})")
+        return labels
+
+    @property
     def meeting_title(self) -> str | None:
         """Extract meeting_title from extras if present."""
         return self.extras.get('meeting_title')

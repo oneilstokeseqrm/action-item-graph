@@ -132,11 +132,15 @@ class ActionItemExtractor:
             extras=envelope.extras,
         )
 
-        # Extract action items
+        # Extract action items — use rich contact labels if available, fall back to contact_ids
+        participants = (
+            envelope.contact_labels if envelope.contacts
+            else (envelope.contact_ids if envelope.contact_ids else None)
+        )
         extraction_result = await self._extract_action_items(
             transcript_text=envelope.content.text,
             meeting_title=envelope.meeting_title,
-            participants=envelope.contact_ids if envelope.contact_ids else None,
+            participants=participants,
             user_name=envelope.extras.get('user_name') if envelope.extras else None,
         )
 

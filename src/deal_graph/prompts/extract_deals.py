@@ -239,7 +239,8 @@ def build_discovery_prompt(
     if meeting_title:
         context_parts.append(f'Meeting title: {meeting_title}')
     if participants:
-        context_parts.append(f"Participants: {', '.join(participants)}")
+        participant_lines = '\n'.join(f'  - {p}' for p in participants)
+        context_parts.append(f"Meeting participants:\n{participant_lines}")
 
     additional_context = '\n'.join(context_parts) if context_parts else ''
 
@@ -280,7 +281,8 @@ def build_targeted_prompt(
     if meeting_title:
         context_parts.append(f'Meeting title: {meeting_title}')
     if participants:
-        context_parts.append(f"Participants: {', '.join(participants)}")
+        participant_lines = '\n'.join(f'  - {p}' for p in participants)
+        context_parts.append(f"Meeting participants:\n{participant_lines}")
 
     additional_context = '\n'.join(context_parts) if context_parts else ''
 
