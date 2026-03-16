@@ -15,6 +15,7 @@ A temporal knowledge graph pipeline for extracting and managing action items fro
 - **Multi-Tenancy**: Complete data isolation via `tenant_id` and `account_id` scoping on all nodes
 - **Dual Embeddings**: Prevents embedding drift with immutable original + mutable current embeddings
 - **Deal Extraction Pipeline**: Concurrent deal detection using MEDDIC-structured extraction, vector matching with graduated thresholds, and LLM-synthesized merging
+- **Contact Enrichment**: Rich contact names in LLM prompts, Owner→Contact linking (IDENTIFIES_AS), Contact→Deal relationships (ENGAGED_ON) with champion/economic_buyer role enrichment
 - **Dual-Pipeline Dispatcher**: Routes each envelope to both Action Item and Deal pipelines concurrently with fault isolation
 - **Postgres Dual-Write**: Optional projection of action items, topics, versions, deals, and deal versions to Neon Postgres for frontend reads (Neo4j remains source of truth)
 
@@ -330,6 +331,8 @@ See [docs/DEAL_SERVICE_ARCHITECTURE.md](./docs/DEAL_SERVICE_ARCHITECTURE.md) for
 (:ActionItem)-[:BELONGS_TO]->(:ActionItemTopic)
 (:ActionItem)-[:HAS_VERSION]->(:ActionItemVersion)
 (:ActionItemTopic)-[:HAS_VERSION]->(:ActionItemTopicVersion)
+(:Owner)-[:IDENTIFIES_AS]->(:Contact)
+(:Contact)-[:ENGAGED_ON]->(:Deal)
 ```
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for detailed schema documentation.
@@ -595,7 +598,7 @@ action-item-graph/
 │   ├── test_pipeline_dual_write.py # Dual-write pipeline integration (28 tests)
 │   ├── test_duplicate_text.py     # Duplicate-text regression
 │   ├── test_uuid7.py              # UUIDv7 identity tests
-│   └── ...                        # 28 test files, 456 tests total
+│   └── ...                        # 30+ test files, 458 tests total
 ├── examples/
 │   ├── process_transcript.py # Basic usage example
 │   ├── run_transcript_tests.py # Transcript test runner
@@ -608,6 +611,8 @@ action-item-graph/
 │   ├── clients/                 # DealNeo4jClient (schema, vector search)
 │   ├── models/                  # Deal, DealVersion, ExtractedDeal, MergedDeal
 │   └── prompts/                 # MEDDIC extraction, dedup, merge prompts
+├── src/shared/                  # Cross-pipeline shared utilities
+│   └── contact_ops.py           # ENGAGED_ON MERGE, role enrichment, contact matching
 ├── src/dispatcher/              # Dual-pipeline envelope dispatcher
 │   └── dispatcher.py            # EnvelopeDispatcher, DispatcherResult
 ├── scripts/

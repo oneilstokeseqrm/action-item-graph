@@ -467,6 +467,13 @@ All nodes include `tenant_id` for multi-tenancy isolation. Constraints enforce u
 
 (:Contact)-[:PARTICIPATED_IN]->(:Interaction)
   # Contacts participate in interactions, NOT directly linked to ActionItems
+
+(:Owner)-[:IDENTIFIES_AS {created_at: datetime}]->(:Contact)
+  # When owner resolver matches an Owner to a Contact from envelope metadata
+
+(:Contact)-[:ENGAGED_ON {created_at: datetime, source: string, role: string, confidence: float, enriched_at: datetime}]->(:Deal)
+  # Contact participation in a deal. Created by both pipelines (MERGE-everywhere).
+  # role/confidence/enriched_at set when deal pipeline matches champion/economic_buyer.
 ```
 
 ### Visual Schema
@@ -554,6 +561,19 @@ See [docs/DEAL_SERVICE_ARCHITECTURE.md](./docs/DEAL_SERVICE_ARCHITECTURE.md) for
 ```
 
 Other associations use shared properties rather than graph edges (e.g., `Deal.account_id`, `Deal.source_interaction_id`).
+
+### Cross-Pipeline Relationships
+
+```
+(:Owner)-[:IDENTIFIES_AS]->(:Contact)
+  # Created when owner resolver matches a resolved owner to contact metadata
+
+(:Contact)-[:ENGAGED_ON]->(:Deal)
+  # Both pipelines MERGE this relationship (MERGE-everywhere for safe concurrency).
+  # Deal pipeline enriches with role (champion, economic_buyer) and confidence.
+```
+
+These relationships are created by both pipelines using shared utilities from `src/shared/contact_ops.py`. The MERGE-everywhere pattern ensures idempotency when both pipelines write concurrently.
 
 ---
 
@@ -702,7 +722,7 @@ Within-batch deduplication using embedding cosine similarity with complete-linka
 
 ### Owner Pre-Resolution (Stage 5)
 
-Account-scoped canonical owner mapping with type-specific caches (LINK-KG pattern).
+Account-scoped canonical owner mapping with type-specific caches (LINK-KG pattern). When envelope contacts are available, the cache is pre-seeded with contact names for better fuzzy matching. Resolved owners are linked to Contact nodes via `(Owner)-[:IDENTIFIES_AS]->(Contact)`.
 
 Resolution cascade:
 1. Exact match against known owners
