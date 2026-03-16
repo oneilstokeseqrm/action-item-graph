@@ -378,3 +378,125 @@ class TestOwnerPreResolver:
 
         assert ai.owner == 'the lead'  # Unchanged on failure
         assert methods.get('unresolved', 0) == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Contact Seeding Tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestOwnerCacheContactSeeding:
+    """Tests for seeding OwnerCache with contact metadata from envelope."""
+
+    def test_add_contact_makes_name_resolvable(self):
+        cache = OwnerCache()
+        cache.add_contact({'contact_id': 'c1', 'name': 'Jane Smith', 'email': 'jane@acme.com'})
+        resolved, method = cache.resolve('Jane Smith')
+        assert resolved == 'Jane Smith'
+        assert method == 'exact'
+
+    def test_add_contact_enables_substring_match(self):
+        cache = OwnerCache()
+        cache.add_contact({'contact_id': 'c1', 'name': 'Jane Smith', 'email': 'jane@acme.com'})
+        resolved, method = cache.resolve('Jane')
+        assert resolved == 'Jane Smith'
+        assert method == 'substring'
+
+    def test_add_contact_does_not_overwrite_existing_owner(self):
+        cache = OwnerCache()
+        cache.add({'canonical_name': 'Jane Smith', 'owner_id': 'o1', 'aliases': []})
+        cache.add_contact({'contact_id': 'c1', 'name': 'Jane Smith', 'email': 'jane@acme.com'})
+        # Should still resolve to the original owner
+        resolved, method = cache.resolve('Jane Smith')
+        assert resolved == 'Jane Smith'
+        # But contact_id should still be recorded
+        assert cache.get_contact_id('Jane Smith') == 'c1'
+
+    def test_get_contact_id_returns_id_for_contact(self):
+        cache = OwnerCache()
+        cache.add_contact({'contact_id': 'c1', 'name': 'Jane Smith', 'email': 'jane@acme.com'})
+        assert cache.get_contact_id('Jane Smith') == 'c1'
+
+    def test_get_contact_id_returns_none_for_non_contact(self):
+        cache = OwnerCache()
+        cache.add({'canonical_name': 'Bob Jones', 'owner_id': 'o1', 'aliases': []})
+        assert cache.get_contact_id('Bob Jones') is None
+
+    def test_add_contact_skips_missing_name(self):
+        cache = OwnerCache()
+        cache.add_contact({'contact_id': 'c1', 'email': 'unknown@acme.com'})
+        assert cache.is_empty
+
+    def test_add_contact_skips_missing_contact_id(self):
+        cache = OwnerCache()
+        cache.add_contact({'name': 'Jane Smith', 'email': 'jane@acme.com'})
+        assert cache.is_empty
+
+    def test_contact_seeding_with_owner_priority(self):
+        """Owners loaded first take priority, contacts fill gaps."""
+        cache = OwnerCache()
+        # Load existing owner
+        cache.add({'canonical_name': 'Jane Smith', 'owner_id': 'o1', 'aliases': []})
+        # Seed contacts — Jane already exists, Bob is new
+        cache.add_contact({'contact_id': 'c1', 'name': 'Jane Smith', 'email': 'jane@acme.com'})
+        cache.add_contact({'contact_id': 'c2', 'name': 'Bob Jones', 'email': 'bob@acme.com'})
+
+        # Both resolvable
+        resolved_jane, _ = cache.resolve('Jane Smith')
+        resolved_bob, _ = cache.resolve('Bob Jones')
+        assert resolved_jane == 'Jane Smith'
+        assert resolved_bob == 'Bob Jones'
+
+        # Both have contact_ids
+        assert cache.get_contact_id('Jane Smith') == 'c1'
+        assert cache.get_contact_id('Bob Jones') == 'c2'
+
+
+class TestOwnerPreResolverContactSeeding:
+    """Tests for OwnerPreResolver.load_cache with contacts parameter."""
+
+    @pytest.mark.asyncio
+    async def test_load_cache_seeds_contacts(self):
+        mock_repo = MagicMock()
+        mock_repo.get_owners_for_account = AsyncMock(return_value=[])
+
+        resolver = OwnerPreResolver(mock_repo)
+        contacts = [
+            {'contact_id': 'c1', 'name': 'Jane Smith', 'email': 'jane@acme.com'},
+            {'contact_id': 'c2', 'name': 'Bob Jones', 'email': 'bob@acme.com'},
+        ]
+        await resolver.load_cache(TENANT_ID, 'acct_001', contacts=contacts)
+
+        assert resolver.get_contact_id('Jane Smith') == 'c1'
+        assert resolver.get_contact_id('Bob Jones') == 'c2'
+
+    @pytest.mark.asyncio
+    async def test_load_cache_without_contacts_backward_compat(self):
+        mock_repo = MagicMock()
+        mock_repo.get_owners_for_account = AsyncMock(return_value=[
+            {'canonical_name': 'Alice', 'owner_id': 'o1', 'aliases': []},
+        ])
+
+        resolver = OwnerPreResolver(mock_repo)
+        count = await resolver.load_cache(TENANT_ID, 'acct_001')
+        assert count == 1
+        assert resolver.get_contact_id('Alice') is None
+
+    @pytest.mark.asyncio
+    async def test_contact_resolution_flow(self):
+        """Full flow: contact seeded → name resolved → contact_id available."""
+        mock_repo = MagicMock()
+        mock_repo.get_owners_for_account = AsyncMock(return_value=[])
+
+        resolver = OwnerPreResolver(mock_repo)
+        await resolver.load_cache(
+            TENANT_ID, 'acct_001',
+            contacts=[{'contact_id': 'c1', 'name': 'Jane Smith', 'email': 'jane@acme.com'}],
+        )
+
+        ai = _make_action_item('Jane')
+        methods = await resolver.resolve_batch([ai])
+
+        assert ai.owner == 'Jane Smith'
+        assert methods.get('substring', 0) == 1
+        assert resolver.get_contact_id('Jane Smith') == 'c1'

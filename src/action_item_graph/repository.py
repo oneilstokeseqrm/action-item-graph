@@ -104,14 +104,14 @@ class ActionItemRepository:
                 i.interaction_type = $interaction_type,
                 i.timestamp = $timestamp,
                 i.source = $source,
-                i.user_id = $user_id,
-                i.pg_user_id = $pg_user_id,
-                i.title = $title,
-                i.duration_seconds = $duration_seconds,
                 i.created_at = datetime()
             ON MATCH SET
                 i.action_item_count = $action_item_count,
                 i.processed_at = datetime()
+            SET i.user_id = COALESCE(i.user_id, $user_id),
+                i.pg_user_id = COALESCE(i.pg_user_id, $pg_user_id),
+                i.title = COALESCE(i.title, $title),
+                i.duration_seconds = COALESCE(i.duration_seconds, $duration_seconds)
             WITH i
             OPTIONAL MATCH (a:Account {account_id: $account_id, tenant_id: $tenant_id})
             FOREACH (_ IN CASE WHEN a IS NOT NULL THEN [1] ELSE [] END |
@@ -504,6 +504,7 @@ class ActionItemRepository:
         tenant_id: UUID,
         owner_name: str,
         account_id: str | None = None,
+        contact_id: str | None = None,
     ) -> dict[str, Any]:
         """
         Find an existing Owner by name/alias, or create a new one.
@@ -520,6 +521,7 @@ class ActionItemRepository:
             tenant_id: Tenant UUID
             owner_name: Name from extraction (e.g., "John", "Sarah")
             account_id: Optional account ID to scope substring matching
+            contact_id: Optional contact_id to link Owner to a Contact
 
         Returns:
             Owner node properties (existing or newly created)
@@ -589,6 +591,10 @@ class ActionItemRepository:
             # Add name to aliases if it's a new variant
             if normalized_name not in owner.get('aliases', []) and normalized_name != owner.get('canonical_name'):
                 await self._add_owner_alias(owner['owner_id'], str(tenant_id), normalized_name)
+            # Enrich with contact_id if not already set
+            if contact_id and not owner.get('contact_id'):
+                await self._set_owner_contact_id(owner['owner_id'], str(tenant_id), contact_id)
+                owner['contact_id'] = contact_id
             return owner
 
         # Create new owner
@@ -597,6 +603,7 @@ class ActionItemRepository:
                 owner_id: randomUUID(),
                 tenant_id: $tenant_id,
                 canonical_name: $name,
+                contact_id: $contact_id,
                 aliases: [],
                 created_at: datetime()
             })
@@ -607,6 +614,7 @@ class ActionItemRepository:
             {
                 'tenant_id': str(tenant_id),
                 'name': normalized_name,
+                'contact_id': contact_id,
             },
         )
         return create_result[0]['owner'] if create_result else {}
@@ -631,6 +639,51 @@ class ActionItemRepository:
                 'alias': alias,
             },
         )
+
+    async def _set_owner_contact_id(
+        self,
+        owner_id: str,
+        tenant_id: str,
+        contact_id: str,
+    ) -> None:
+        """Set contact_id on an existing Owner node (only if currently null)."""
+        query = """
+            MATCH (o:Owner {owner_id: $owner_id, tenant_id: $tenant_id})
+            WHERE o.contact_id IS NULL
+            SET o.contact_id = $contact_id
+        """
+        await self.neo4j.execute_write(
+            query,
+            {'owner_id': owner_id, 'tenant_id': tenant_id, 'contact_id': contact_id},
+        )
+
+    async def link_owner_to_contact(
+        self,
+        owner_id: str,
+        contact_id: str,
+        tenant_id: UUID,
+    ) -> bool:
+        """Create (Owner)-[:IDENTIFIES_AS]->(Contact) relationship.
+
+        Uses MATCH for both nodes — if either doesn't exist, no-op.
+        Uses MERGE for the relationship for idempotency.
+        """
+        query = """
+            MATCH (o:Owner {owner_id: $owner_id, tenant_id: $tenant_id})
+            MATCH (c:Contact {contact_id: $contact_id, tenant_id: $tenant_id})
+            MERGE (o)-[r:IDENTIFIES_AS]->(c)
+            ON CREATE SET r.created_at = datetime()
+            RETURN r IS NOT NULL as created
+        """
+        result = await self.neo4j.execute_write(
+            query,
+            {
+                'owner_id': owner_id,
+                'contact_id': contact_id,
+                'tenant_id': str(tenant_id),
+            },
+        )
+        return result[0]['created'] if result else False
 
     async def get_owner_by_name(
         self,

@@ -372,7 +372,8 @@ def build_extraction_prompt(
     if meeting_title:
         context_parts.append(f'Meeting title: {meeting_title}')
     if participants:
-        context_parts.append(f"Participants: {', '.join(participants)}")
+        participant_lines = '\n'.join(f'  - {p}' for p in participants)
+        context_parts.append(f"Meeting participants:\n{participant_lines}")
     if user_name:
         context_parts.append(f'Recording user: {user_name}')
 

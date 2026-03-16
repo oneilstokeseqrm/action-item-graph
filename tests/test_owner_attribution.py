@@ -204,7 +204,8 @@ class TestBuildExtractionPrompt:
         )
         user_msg = messages[1]['content']
         assert "Meeting title: Weekly Sync" in user_msg
-        assert "Participants: Alice, Bob" in user_msg
+        assert "  - Alice" in user_msg
+        assert "  - Bob" in user_msg
         assert "Recording user: Alice" in user_msg
 
 

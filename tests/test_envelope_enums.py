@@ -1,4 +1,4 @@
-"""Tests for EnvelopeV1 enum expansion (email + meeting support)."""
+"""Tests for EnvelopeV1 enum expansion (email + meeting support) and contact enrichment."""
 
 from action_item_graph.models.envelope import (
     ContentFormat,
@@ -6,6 +6,110 @@ from action_item_graph.models.envelope import (
     InteractionType,
     SourceType,
 )
+
+
+# Reusable base envelope dict for tests
+_BASE_ENVELOPE = {
+    "schema_version": "v1",
+    "tenant_id": "550e8400-e29b-41d4-a716-446655440000",
+    "user_id": "user-123",
+    "interaction_type": "transcript",
+    "content": {"text": "Hello", "format": "plain"},
+    "timestamp": "2026-03-16T10:00:00Z",
+    "source": "web-mic",
+}
+
+
+class TestContactEnrichmentProperties:
+    """Tests for contacts, contact_names properties on EnvelopeV1."""
+
+    def test_contacts_returns_full_metadata(self):
+        contacts = [
+            {"contact_id": "c1", "email": "jane@acme.com", "name": "Jane Smith", "role": "organizer"},
+            {"contact_id": "c2", "email": "bob@acme.com", "name": "Bob Jones", "role": "attendee"},
+        ]
+        envelope = EnvelopeV1.model_validate({
+            **_BASE_ENVELOPE,
+            "extras": {"contacts": contacts},
+        })
+        assert envelope.contacts == contacts
+        assert len(envelope.contacts) == 2
+
+    def test_contacts_empty_when_missing(self):
+        envelope = EnvelopeV1.model_validate({**_BASE_ENVELOPE, "extras": {}})
+        assert envelope.contacts == []
+
+    def test_contacts_empty_when_no_extras(self):
+        envelope = EnvelopeV1.model_validate(_BASE_ENVELOPE)
+        assert envelope.contacts == []
+
+    def test_contact_names_returns_names(self):
+        contacts = [
+            {"contact_id": "c1", "email": "jane@acme.com", "name": "Jane Smith", "role": "organizer"},
+            {"contact_id": "c2", "email": "bob@acme.com", "name": "Bob Jones", "role": "attendee"},
+        ]
+        envelope = EnvelopeV1.model_validate({
+            **_BASE_ENVELOPE,
+            "extras": {"contacts": contacts},
+        })
+        assert envelope.contact_names == ["Jane Smith", "Bob Jones"]
+
+    def test_contact_names_falls_back_to_email(self):
+        contacts = [
+            {"contact_id": "c1", "email": "unknown@acme.com", "name": None, "role": "attendee"},
+            {"contact_id": "c2", "email": "bob@acme.com", "name": "Bob Jones", "role": "attendee"},
+        ]
+        envelope = EnvelopeV1.model_validate({
+            **_BASE_ENVELOPE,
+            "extras": {"contacts": contacts},
+        })
+        assert envelope.contact_names == ["unknown@acme.com", "Bob Jones"]
+
+    def test_contact_names_falls_back_to_unknown(self):
+        contacts = [{"contact_id": "c1", "role": "attendee"}]
+        envelope = EnvelopeV1.model_validate({
+            **_BASE_ENVELOPE,
+            "extras": {"contacts": contacts},
+        })
+        assert envelope.contact_names == ["Unknown"]
+
+    def test_contact_names_empty_when_no_contacts(self):
+        envelope = EnvelopeV1.model_validate(_BASE_ENVELOPE)
+        assert envelope.contact_names == []
+
+    def test_opportunity_id_from_extras(self):
+        envelope = EnvelopeV1.model_validate({
+            **_BASE_ENVELOPE,
+            "extras": {"opportunity_id": "opp-123"},
+        })
+        assert envelope.opportunity_id == "opp-123"
+
+    def test_opportunity_id_none_when_missing(self):
+        envelope = EnvelopeV1.model_validate(_BASE_ENVELOPE)
+        assert envelope.opportunity_id is None
+
+    def test_contact_ids_still_works(self):
+        """Backward compat: contact_ids property unchanged."""
+        envelope = EnvelopeV1.model_validate({
+            **_BASE_ENVELOPE,
+            "extras": {"contact_ids": ["id1", "id2"]},
+        })
+        assert envelope.contact_ids == ["id1", "id2"]
+
+    def test_contacts_and_contact_ids_coexist(self):
+        """Both old and new contact formats can coexist."""
+        envelope = EnvelopeV1.model_validate({
+            **_BASE_ENVELOPE,
+            "extras": {
+                "contact_ids": ["c1", "c2"],
+                "contacts": [
+                    {"contact_id": "c1", "email": "jane@acme.com", "name": "Jane Smith", "role": "organizer"},
+                ],
+            },
+        })
+        assert envelope.contact_ids == ["c1", "c2"]
+        assert len(envelope.contacts) == 1
+        assert envelope.contact_names == ["Jane Smith"]
 
 
 class TestInteractionTypeEnum:

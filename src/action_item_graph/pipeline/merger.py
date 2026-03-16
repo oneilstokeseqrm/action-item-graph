@@ -15,12 +15,15 @@ from uuid import UUID
 
 from ..clients.neo4j_client import Neo4jClient
 from ..clients.openai_client import OpenAIClient
+from ..logging import get_logger
 from ..models.action_item import ActionItem, ActionItemStatus
 from ..models.entities import Interaction
 from ..prompts.extract_action_items import ExtractedActionItem
 from ..prompts.merge_action_items import MergedActionItem, build_merge_prompt
 from ..repository import ActionItemRepository
 from .matcher import MatchResult
+
+logger = get_logger(__name__)
 
 
 # Map implied status strings to ActionItemStatus enum
@@ -76,6 +79,7 @@ class ActionItemMerger:
         match_result: MatchResult,
         interaction: Interaction,
         action_item: ActionItem,
+        contact_id: str | None = None,
     ) -> MergeResult:
         """
         Execute the merge decision for a matched/unmatched extraction.
@@ -84,6 +88,7 @@ class ActionItemMerger:
             match_result: Result from ActionItemMatcher.find_matches()
             interaction: The Interaction this extraction came from
             action_item: The ActionItem model (with embeddings) from extraction
+            contact_id: Optional contact_id if owner matched an envelope contact
 
         Returns:
             MergeResult describing what was done
@@ -93,6 +98,7 @@ class ActionItemMerger:
             return await self._create_new(
                 action_item=action_item,
                 interaction=interaction,
+                contact_id=contact_id,
             )
 
         candidate, decision = match_result.best_match
@@ -122,6 +128,7 @@ class ActionItemMerger:
                 related_to_id=candidate.action_item_id,
                 action_item=action_item,
                 interaction=interaction,
+                contact_id=contact_id,
             )
 
         else:
@@ -129,6 +136,7 @@ class ActionItemMerger:
             return await self._create_new(
                 action_item=action_item,
                 interaction=interaction,
+                contact_id=contact_id,
             )
 
     async def execute_batch(
@@ -166,6 +174,7 @@ class ActionItemMerger:
         self,
         action_item: ActionItem,
         interaction: Interaction,
+        contact_id: str | None = None,
     ) -> MergeResult:
         """
         Create a new ActionItem node.
@@ -173,6 +182,7 @@ class ActionItemMerger:
         Args:
             action_item: ActionItem model to create
             interaction: Source interaction
+            contact_id: Optional contact_id if owner matched an envelope contact
 
         Returns:
             MergeResult for the creation
@@ -192,6 +202,7 @@ class ActionItemMerger:
             tenant_id=action_item.tenant_id,
             owner_name=action_item.owner,
             account_id=action_item.account_id,
+            contact_id=contact_id,
         )
         await self.repository.link_to_owner(
             action_item_id=str(action_item.id),
@@ -199,16 +210,31 @@ class ActionItemMerger:
             tenant_id=action_item.tenant_id,
         )
 
+        # Link Owner to Contact if contact_id resolved
+        if owner.get('contact_id'):
+            try:
+                await self.repository.link_owner_to_contact(
+                    owner_id=owner['owner_id'],
+                    contact_id=owner['contact_id'],
+                    tenant_id=action_item.tenant_id,
+                )
+            except Exception:
+                logger.warning('owner_contact_link_failed', exc_info=True)
+
+        details: dict[str, Any] = {
+            'owner_id': owner['owner_id'],
+            'owner_name': owner.get('canonical_name', action_item.owner),
+        }
+        if owner.get('contact_id'):
+            details['contact_id'] = owner['contact_id']
+
         return MergeResult(
             action_item_id=str(action_item.id),
             action='created',
             was_new=True,
             version_created=False,
             linked_interaction_id=str(interaction.interaction_id),
-            details={
-                'owner_id': owner['owner_id'],
-                'owner_name': owner.get('canonical_name', action_item.owner),
-            },
+            details=details,
         )
 
     async def _update_status(
@@ -400,6 +426,7 @@ class ActionItemMerger:
         related_to_id: str,
         action_item: ActionItem,
         interaction: Interaction,
+        contact_id: str | None = None,
     ) -> MergeResult:
         """
         Create a new ActionItem and link it to an existing related item.
@@ -411,6 +438,7 @@ class ActionItemMerger:
             related_to_id: ID of the related ActionItem
             action_item: ActionItem model to create
             interaction: Source interaction
+            contact_id: Optional contact_id if owner matched an envelope contact
 
         Returns:
             MergeResult for the creation with link
@@ -419,6 +447,7 @@ class ActionItemMerger:
         create_result = await self._create_new(
             action_item=action_item,
             interaction=interaction,
+            contact_id=contact_id,
         )
 
         # Then link to the related item

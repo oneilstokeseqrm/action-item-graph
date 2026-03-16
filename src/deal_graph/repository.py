@@ -182,10 +182,10 @@ class DealRepository:
                 i.interaction_type = $interaction_type,
                 i.timestamp = $timestamp,
                 i.source = $source,
-                i.trace_id = $trace_id,
                 i.created_at = datetime()
             ON MATCH SET
                 i.processed_at = datetime()
+            SET i.trace_id = COALESCE(i.trace_id, $trace_id)
             RETURN i {.*} as interaction
         """
         result = await self.neo4j.execute_write(
