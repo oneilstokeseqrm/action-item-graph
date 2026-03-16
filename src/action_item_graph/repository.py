@@ -104,14 +104,14 @@ class ActionItemRepository:
                 i.interaction_type = $interaction_type,
                 i.timestamp = $timestamp,
                 i.source = $source,
-                i.user_id = $user_id,
-                i.pg_user_id = $pg_user_id,
-                i.title = $title,
-                i.duration_seconds = $duration_seconds,
                 i.created_at = datetime()
             ON MATCH SET
                 i.action_item_count = $action_item_count,
                 i.processed_at = datetime()
+            SET i.user_id = COALESCE(i.user_id, $user_id),
+                i.pg_user_id = COALESCE(i.pg_user_id, $pg_user_id),
+                i.title = COALESCE(i.title, $title),
+                i.duration_seconds = COALESCE(i.duration_seconds, $duration_seconds)
             WITH i
             OPTIONAL MATCH (a:Account {account_id: $account_id, tenant_id: $tenant_id})
             FOREACH (_ IN CASE WHEN a IS NOT NULL THEN [1] ELSE [] END |

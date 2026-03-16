@@ -114,6 +114,16 @@ class EnvelopeV1(BaseModel):
         return self.extras.get('contact_ids', [])
 
     @property
+    def contacts(self) -> list[dict]:
+        """Full contact metadata from extras: [{contact_id, email, name, role}]."""
+        return self.extras.get('contacts', [])
+
+    @property
+    def contact_names(self) -> list[str]:
+        """Human-readable names for owner resolver seeding."""
+        return [c.get('name') or c.get('email', 'Unknown') for c in self.contacts]
+
+    @property
     def meeting_title(self) -> str | None:
         """Extract meeting_title from extras if present."""
         return self.extras.get('meeting_title')
