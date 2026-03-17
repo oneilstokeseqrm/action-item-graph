@@ -12,11 +12,14 @@ Provides end-to-end processing:
 8. Execute merge decisions (create/update/link)
 9. Resolve topics for action items (Topic Grouping)
 10. Dual-write to Postgres (failure-isolated)
+11. Write to agent outbox for downstream agent processing (failure-isolated)
 """
 
 from __future__ import annotations
 
 import os
+
+from sqlalchemy import text
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -445,6 +448,17 @@ class ActionItemPipeline:
                             interaction=extraction.interaction,
                             topic_results=result.topic_results,
                         )
+
+                # Step 11: Write to agent outbox (failure-isolated)
+                with timer.stage("agent_outbox"):
+                    await self._write_agent_outbox(
+                        merge_results=merge_results,
+                        action_items=filtered_action_items,
+                        envelope=envelope,
+                        tenant_id=tenant_id,
+                        account_id=account_id,
+                        interaction_id=str(extraction.interaction.interaction_id),
+                    )
 
             except ExtractionError as e:
                 logger.error("extraction_failed", error=str(e))
@@ -1041,6 +1055,124 @@ class ActionItemPipeline:
                     topic_id=topic_result.topic_id,
                     action_item_id=topic_result.action_item_id,
                 )
+
+
+    # =========================================================================
+    # Step 11: Agent Outbox Writer (failure-isolated)
+    # =========================================================================
+
+    async def _write_agent_outbox(
+        self,
+        *,
+        merge_results: list[MergeResult],
+        action_items: list[ActionItem],
+        envelope: EnvelopeV1,
+        tenant_id: UUID,
+        account_id: str,
+        interaction_id: str,
+    ) -> None:
+        """Write to agent_action_outbox for downstream agent processing.
+
+        Failure-isolated — never blocks the pipeline. Writes one row per
+        pipeline run with per-item priority scores and action item summaries
+        for the agent's triage LLM.
+
+        Requires ENABLE_AGENT_OUTBOX=true env var and a Postgres client.
+        """
+        import json as _json
+
+        if not os.getenv("ENABLE_AGENT_OUTBOX", "false").lower() == "true":
+            return
+        if self.postgres is None:
+            return
+
+        # Build IDs from merge results
+        created_ids = []
+        updated_ids = []
+        for mr in merge_results:
+            if mr.action == 'created':
+                created_ids.append(mr.action_item_id)
+            elif mr.action in ('merged', 'status_updated'):
+                updated_ids.append(mr.action_item_id)
+
+        if not created_ids and not updated_ids:
+            return
+
+        try:
+            # Build per-item priority scores with user_owned flag
+            # Index action items by ID for lookup
+            ai_by_id: dict[str, ActionItem] = {str(ai.id): ai for ai in action_items}
+
+            priority_scores = {}
+            action_item_summaries = {}
+            for mr in merge_results:
+                ai = ai_by_id.get(mr.action_item_id)
+                if ai is None:
+                    continue
+                item_id = mr.action_item_id
+                priority_scores[item_id] = {
+                    "score": ai.priority_score if ai.priority_score is not None else 0.0,
+                    "user_owned": getattr(ai, 'is_user_owned', False),
+                }
+                action_item_summaries[item_id] = {
+                    "summary": ai.summary,
+                    "owner": ai.owner,
+                    "status": ai.status.value if hasattr(ai.status, 'value') else str(ai.status),
+                    "commitment_strength": getattr(ai, 'commitment_strength', None),
+                }
+
+            dedup_key = f"{tenant_id}:action_item:{interaction_id}"
+
+            envelope_metadata = {
+                "interaction_type": envelope.interaction_type.value
+                    if hasattr(envelope.interaction_type, 'value')
+                    else str(envelope.interaction_type),
+                "source": envelope.source.value
+                    if hasattr(envelope.source, 'value')
+                    else str(envelope.source),
+                "meeting_title": envelope.meeting_title,
+                "account_name": envelope.extras.get("account_name")
+                    if envelope.extras else None,
+            }
+
+            async with self.postgres.engine.begin() as conn:
+                await conn.execute(
+                    text("""
+                        INSERT INTO agent_action_outbox (
+                            id, tenant_id, account_id, interaction_id, source_pipeline,
+                            created_action_item_ids, updated_action_item_ids,
+                            priority_scores, action_item_summaries, envelope_metadata,
+                            status, dedup_key, created_at
+                        ) VALUES (
+                            gen_random_uuid(), :tenant_id, :account_id::uuid, :interaction_id::uuid,
+                            'action_item', :created_ids, :updated_ids,
+                            :priority_scores, :summaries, :envelope_metadata,
+                            'pending', :dedup_key, now()
+                        ) ON CONFLICT (dedup_key) DO NOTHING
+                    """),
+                    {
+                        "tenant_id": str(tenant_id),
+                        "account_id": account_id,
+                        "interaction_id": interaction_id,
+                        "created_ids": created_ids,
+                        "updated_ids": updated_ids,
+                        "priority_scores": _json.dumps(priority_scores),
+                        "summaries": _json.dumps(action_item_summaries),
+                        "envelope_metadata": _json.dumps(envelope_metadata),
+                        "dedup_key": dedup_key,
+                    },
+                )
+
+            logger.info(
+                "agent_outbox_written",
+                dedup_key=dedup_key,
+                created=len(created_ids),
+                updated=len(updated_ids),
+            )
+
+        except Exception:
+            # Failure-isolated — never block the pipeline
+            logger.warning("agent_outbox_write_failed", exc_info=True)
 
 
 # =============================================================================
