@@ -1,0 +1,5 @@
+config:
+  aws:region: us-east-1
+  action-item-graph-infra:api-base-url: https://api-production-c33a.up.railway.app
+  action-item-graph-infra:worker-api-key:
+    secure: AAABAJyya3qCO5yaKyYaIeCdyUusYZtzbw9vkRAMiDHvgitmeVX82cjrKziNlyYkp6BObtuBsr3PdUyEoHG+7eQS//uqOHZR9QiojPNLmdVf+SqYG1Offm0KXVCd+l7U

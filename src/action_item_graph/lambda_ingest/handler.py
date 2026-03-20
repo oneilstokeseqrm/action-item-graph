@@ -14,6 +14,7 @@ from aws_lambda_powertools.utilities.data_classes.sqs_event import SQSRecord
 from .config import LambdaConfig
 from .envelope import parse_sqs_record_body
 from .api_client import submit_to_railway
+from .secrets import get_worker_api_key
 
 # Module-level singletons — survive across warm Lambda invocations
 processor = BatchProcessor(event_type=EventType.SQS, raise_on_entire_batch_failure=False)
@@ -24,10 +25,15 @@ _config: LambdaConfig | None = None
 
 
 def _get_config() -> LambdaConfig:
-    """Lazy-init config singleton."""
+    """Lazy-init config singleton.
+
+    Fetches WORKER_API_KEY from Secrets Manager on first call (cold start).
+    The secret is cached for subsequent warm invocations.
+    """
     global _config
     if _config is None:
         _config = LambdaConfig()
+        _config.WORKER_API_KEY = get_worker_api_key()
     return _config
 
 

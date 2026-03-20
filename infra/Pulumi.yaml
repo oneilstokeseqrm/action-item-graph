@@ -1,0 +1,6 @@
+name: action-item-graph-infra
+runtime:
+  name: python
+  options:
+    virtualenv: venv
+description: AWS infrastructure for the action-item-graph event ingestion pipeline (EventBridge → SQS → Lambda forwarder → Railway)
