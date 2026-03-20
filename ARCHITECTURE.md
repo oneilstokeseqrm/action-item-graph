@@ -301,6 +301,8 @@ EventBridge event → SQS queue → Lambda forwarder → Railway FastAPI → Env
 | Tools | AWS Lambda Powertools (BatchProcessor, Logger, Tracer) |
 | Retry | 5xx: exponential backoff + jitter (max 2 retries). 4xx: no retry |
 | Config | pydantic-settings (`LambdaConfig` in `lambda_ingest/config.py`) |
+| Secrets | `WORKER_API_KEY` from AWS Secrets Manager (cold-start fetch, warm-invocation cache) |
+| IaC | Pulumi Python in `infra/` — manages all AWS resources (EventBridge, SQS, Lambda, IAM, Secrets Manager) |
 | Packaging | `scripts/package_lambda.sh` → `dist/action-item-graph-ingest.zip` (~19MB) |
 | Dependencies | pydantic, pydantic-settings, httpx, aws-lambda-powertools[tracer] |
 

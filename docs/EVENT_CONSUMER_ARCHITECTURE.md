@@ -593,11 +593,23 @@ Lambda would crash on import.
 
 ### Deploying the Lambda
 
-```bash
-# Package
-./scripts/package_lambda.sh
+**With Pulumi (recommended):**
 
-# Deploy
+```bash
+# Package + deploy in one step
+./scripts/package_lambda.sh
+cd infra && pulumi up --yes --stack prod
+```
+
+Pulumi manages the Lambda code upload, configuration, and all supporting AWS
+resources. On push to `main`, the GitHub Actions workflow
+(`.github/workflows/deploy-lambda.yml`) runs this automatically when
+`src/action_item_graph/lambda_ingest/` or `infra/` files change.
+
+**Manual fallback (without IaC):**
+
+```bash
+./scripts/package_lambda.sh
 aws lambda update-function-code \
   --function-name "{your-service}-ingest" \
   --zip-file "fileb://dist/{your-service}-ingest.zip"
@@ -1024,32 +1036,55 @@ If you only have a single pipeline, skip the dispatcher and call
    automatically. Ensure the `[api]` extra is installed (Railway should detect
    `fastapi` in optional deps).
 
-### Lambda
+### Lambda (with Pulumi IaC)
 
-1. Run `./scripts/package_lambda.sh` to build the zip.
-2. Deploy with:
+All AWS resources (SQS, EventBridge, Lambda, IAM, Secrets Manager) are managed
+by Pulumi. The IaC lives in `infra/`.
+
+1. **First-time setup** (once per developer):
    ```bash
-   aws lambda update-function-code \
-     --function-name "{your-service}-ingest" \
-     --zip-file "fileb://dist/{your-service}-ingest.zip"
-   ```
-3. Set Lambda environment variables: `API_BASE_URL`, `WORKER_API_KEY`,
-   `HTTP_TIMEOUT_SECONDS`, `MAX_RETRIES`.
-4. Verify the event source mapping is active:
-   ```bash
-   aws lambda list-event-source-mappings \
-     --function-name "{your-service}-ingest"
+   cd infra
+   python3 -m venv venv && source venv/bin/activate
+   pip install -r requirements.txt
+   export PULUMI_ACCESS_TOKEN=pul-xxxx  # From app.pulumi.com
+   pulumi login https://api.pulumi.com
    ```
 
-### Generating the Shared Secret
+2. **Deploy Lambda code changes**:
+   ```bash
+   ./scripts/package_lambda.sh
+   cd infra && pulumi up --stack prod
+   ```
 
+3. **CI/CD**: Pushes to `main` that touch `src/action_item_graph/lambda_ingest/`
+   or `infra/` automatically trigger `.github/workflows/deploy-lambda.yml`.
+
+4. **View current state**: `cd infra && pulumi stack output`
+
+### Lambda (manual fallback)
+
+If Pulumi is not set up, deploy with the AWS CLI:
 ```bash
-# Generate a random 32-byte hex token
-python3 -c "import secrets; print(secrets.token_hex(32))"
+./scripts/package_lambda.sh
+aws lambda update-function-code \
+  --function-name "{your-service}-ingest" \
+  --zip-file "fileb://dist/{your-service}-ingest.zip"
 ```
 
-Set this value as `WORKER_API_KEY` in **both** the Lambda env vars and the
-Railway env vars. They must match exactly.
+### Secret Management
+
+`WORKER_API_KEY` is stored in **AWS Secrets Manager** at
+`/action-item-graph/worker-api-key`. The Lambda fetches it at cold start
+(cached for warm invocations). Railway still uses a `WORKER_API_KEY`
+environment variable — both values must match.
+
+To rotate the secret:
+```bash
+cd infra
+pulumi config set --secret worker-api-key "NEW_VALUE"
+pulumi up --stack prod
+```
+Then update the Railway env var to match.
 
 ---
 
@@ -1127,7 +1162,7 @@ Publishers set `detail-type` based on the interaction type:
 | **`return_exceptions=True`** | Without it, `asyncio.gather` cancels remaining coroutines when one throws. With it, each pipeline runs to completion independently — partial success is better than all-or-nothing. |
 | **`overall_success = any_succeeded`** | A 200 response (Lambda acks, SQS deletes) means at least one pipeline produced useful results. If one pipeline is consistently failing, the other keeps working. Monitor `errors` in the response for partial failures. |
 | **`VisibilityTimeout=720s`** | Must exceed worst-case processing time. Lambda timeout (120s) × max attempts (3) = 360s. 720s provides 2× safety margin. |
-| **No IaC** | AWS resources created via CLI, consistent with existing infrastructure. Each service only needs ~5 resources (rule, queue, DLQ, Lambda, event source mapping). |
+| **Pulumi IaC** | All AWS resources managed via Pulumi Python in `infra/`. The `forwarder.py` module is a reusable pattern — copy `infra/` to a sibling repo, change the parameters in `__main__.py`, and run `pulumi import` to adopt existing resources. WORKER_API_KEY stored in AWS Secrets Manager, fetched at Lambda cold start. |
 | **`log_event=False`** | Prevents full transcript/email content from appearing in CloudWatch logs (privacy, cost). |
 | **Stub `__init__.py` in Lambda zip** | The real package `__init__.py` eagerly imports pipeline code with heavy deps. The stub prevents import crashes in the Lambda environment. |
 | **`raise_on_entire_batch_failure=False`** | Partial failure mode: if one record fails in a batch, only that record is retried. (Moot with `BatchSize=1` but future-proofs for batching.) |
@@ -1139,26 +1174,47 @@ Publishers set `detail-type` based on the interaction type:
 
 Use this when standing up a new consumer service.
 
-### AWS Resources
+### AWS Resources (via Pulumi IaC)
 
-- [ ] Create SQS DLQ: `{your-service}-dlq`
-- [ ] Create SQS queue: `{your-service}-queue` (VisibilityTimeout=720,
-      redrive to DLQ, maxReceiveCount=3)
-- [ ] Add SQS resource policy allowing EventBridge `sqs:SendMessage`
-- [ ] Create EventBridge rule: `{your-service}-rule` with your event pattern
-- [ ] Set EventBridge rule target to your SQS queue
-- [ ] Create IAM role: `{your-service}-ingest-role` with SQS + logs + X-Ray
-      permissions
-- [ ] Create Lambda: `{your-service}-ingest` (python3.11, arm64, 256MB, 120s)
-- [ ] Set Lambda env vars: `API_BASE_URL`, `WORKER_API_KEY`
-- [ ] Create event source mapping: queue → Lambda (BatchSize=1,
-      ReportBatchItemFailures)
-- [ ] Generate shared secret (`secrets.token_hex(32)`) for `WORKER_API_KEY`
+1. Copy `infra/` from this repo to your new service repo.
+2. Update `infra/Pulumi.yaml`: change `name` to `{your-service}-infra`.
+3. Update `infra/__main__.py`: change `service_name`, `event_sources`,
+   `detail_types`, `lambda_handler`, `lambda_zip_path`, and `lambda_env_vars`.
+4. Set up Pulumi:
+   ```bash
+   cd infra
+   python3 -m venv venv && source venv/bin/activate
+   pip install -r requirements.txt
+   export PULUMI_ACCESS_TOKEN=pul-xxxx
+   pulumi login https://api.pulumi.com
+   pulumi stack init prod
+   pulumi config set aws:region us-east-1
+   pulumi config set api-base-url https://your-service.up.railway.app
+   pulumi config set --secret worker-api-key "$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+   ```
+5. If importing existing resources: run `pulumi import` for each (see below).
+   If creating new: `pulumi up` creates everything.
+
+**Importing existing resources** (if already created via CLI):
+```bash
+pulumi import aws:sqs/queue:Queue "{your-service}-dlq" "https://sqs.us-east-1.amazonaws.com/{account}/{your-service}-dlq"
+pulumi import aws:sqs/queue:Queue "{your-service}-queue" "https://sqs.us-east-1.amazonaws.com/{account}/{your-service}-queue"
+pulumi import aws:iam/role:Role "{your-service}-ingest-role" "{your-service}-ingest-role"
+pulumi import aws:iam/rolePolicy:RolePolicy "{your-service}-ingest-policy" "{your-service}-ingest-role:{your-service}-ingest-policy"
+pulumi import aws:cloudwatch/eventRule:EventRule "{your-service}-rule" "{your-service}-rule"
+pulumi import aws:cloudwatch/eventTarget:EventTarget "{your-service}-target" "{your-service}-rule/{your-service}-queue"
+pulumi import aws:lambda/function:Function "{your-service}-ingest" "{your-service}-ingest"
+pulumi import aws:lambda/eventSourceMapping:EventSourceMapping "{your-service}-esm" "{esm-uuid}"
+pulumi import aws:sqs/queuePolicy:QueuePolicy "{your-service}-queue-policy" "https://sqs.us-east-1.amazonaws.com/{account}/{your-service}-queue"
+```
+
+Then run `pulumi preview` — fix any diffs until you see zero changes.
 
 ### Lambda Code
 
 - [ ] `handler.py` — Powertools BatchProcessor + process_partial_response
 - [ ] `config.py` — pydantic-settings LambdaConfig
+- [ ] `secrets.py` — Secrets Manager fetch + cold-start caching
 - [ ] `envelope.py` — parse EventBridge wrapper, extract `detail`
 - [ ] `api_client.py` — httpx POST with exponential backoff + jitter
 - [ ] `package_lambda.sh` — minimal zip with stub `__init__.py`

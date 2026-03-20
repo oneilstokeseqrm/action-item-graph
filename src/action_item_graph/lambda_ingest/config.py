@@ -7,10 +7,14 @@ from pydantic import Field
 
 
 class LambdaConfig(BaseSettings):
-    """Lambda environment variables."""
+    """Lambda environment variables.
+
+    WORKER_API_KEY is populated from Secrets Manager at cold start,
+    not from environment variables. See handler.py._get_config().
+    """
 
     API_BASE_URL: str
-    WORKER_API_KEY: str
+    WORKER_API_KEY: str = ""  # Set from Secrets Manager at cold start
     HTTP_TIMEOUT_SECONDS: int = Field(default=100, ge=5, le=120)
     MAX_RETRIES: int = Field(default=2, ge=0, le=5)
 

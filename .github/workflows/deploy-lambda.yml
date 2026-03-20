@@ -1,0 +1,59 @@
+# Deploy Lambda forwarder when handler code changes.
+#
+# Triggers on push to main touching the Lambda source or packaging script.
+# Packages the Lambda zip, then runs `pulumi up` to deploy.
+
+name: Deploy Lambda
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/action_item_graph/lambda_ingest/**"
+      - "scripts/package_lambda.sh"
+      - "infra/**"
+
+jobs:
+  deploy:
+    name: Package & Deploy Lambda
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # Required for OIDC
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Package Lambda
+        run: bash scripts/package_lambda.sh
+
+      - name: Install Pulumi dependencies
+        working-directory: infra
+        run: |
+          python -m venv venv
+          source venv/bin/activate
+          pip install -r requirements.txt
+
+      - name: Deploy with Pulumi
+        uses: pulumi/actions@v6
+        with:
+          command: up
+          stack-name: prod
+          work-dir: infra
+        env:
+          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
