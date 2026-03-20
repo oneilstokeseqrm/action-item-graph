@@ -83,6 +83,10 @@ def create_forwarder_stack(
     """
     secrets = secrets or {}
 
+    # Resolve AWS account + region dynamically for IAM policy ARNs
+    caller = aws.get_caller_identity()
+    region = aws.get_region()
+
     # ── 1. SQS Dead Letter Queue ──
     dlq = aws.sqs.Queue(
         f"{service_name}-dlq",
@@ -193,7 +197,7 @@ def create_forwarder_stack(
     # ── 8. IAM Inline Policy ──
     def _build_policy(args: list) -> str:
         queue_arn_val = args[0]
-        log_group = f"arn:aws:logs:us-east-1:211125681610:log-group:/aws/lambda/{service_name}-ingest:*"
+        log_group = f"arn:aws:logs:{region.name}:{caller.account_id}:log-group:/aws/lambda/{service_name}-ingest:*"
 
         statements = [
             {
