@@ -430,22 +430,25 @@ curl -X POST http://localhost:8000/process \
 
 The service initializes Neo4j and OpenAI clients at startup and dispatches envelopes through `EnvelopeDispatcher` (both Action Item and Deal pipelines).
 
-### Lambda Packaging
+### Lambda Packaging & Deployment
 
-Build the Lambda deployment zip for the event forwarder:
+Build and deploy the Lambda event forwarder:
 
 ```bash
 # Package Lambda for arm64 deployment
 ./scripts/package_lambda.sh
 # Output: dist/action-item-graph-ingest.zip (~19MB)
 
-# Deploy to AWS
+# Deploy with Pulumi (recommended)
+cd infra && pulumi up --stack prod
+
+# Or deploy manually (without IaC)
 aws lambda update-function-code \
   --function-name action-item-graph-ingest \
   --zip-file fileb://dist/action-item-graph-ingest.zip
 ```
 
-The Lambda parses EventBridge-wrapped SQS messages and forwards them to the Railway API service.
+All AWS resources (EventBridge, SQS, Lambda, IAM, Secrets Manager) are managed by Pulumi IaC in `infra/`. The `WORKER_API_KEY` is stored in AWS Secrets Manager and fetched at Lambda cold start. See [Event Consumer Architecture](./docs/EVENT_CONSUMER_ARCHITECTURE.md) for details.
 
 ## API Reference
 
@@ -580,6 +583,7 @@ action-item-graph/
 │   └── lambda_ingest/           # AWS Lambda forwarder
 │       ├── handler.py           # Powertools BatchProcessor entry point
 │       ├── config.py            # Lambda configuration (pydantic-settings)
+│       ├── secrets.py           # Secrets Manager fetch + cold-start caching
 │       ├── envelope.py          # EventBridge wrapper parser
 │       └── api_client.py        # Railway API client with retry
 ├── tests/
@@ -598,7 +602,8 @@ action-item-graph/
 │   ├── test_pipeline_dual_write.py # Dual-write pipeline integration (28 tests)
 │   ├── test_duplicate_text.py     # Duplicate-text regression
 │   ├── test_uuid7.py              # UUIDv7 identity tests
-│   └── ...                        # 30+ test files, 458 tests total
+│   ├── test_lambda_secrets.py     # Secrets Manager fetch + caching (8 tests)
+│   └── ...                        # 30+ test files, 471 tests total
 ├── examples/
 │   ├── process_transcript.py # Basic usage example
 │   ├── run_transcript_tests.py # Transcript test runner
@@ -626,6 +631,12 @@ action-item-graph/
 │   ├── SMOKE_TEST_GUIDE.md      # Comprehensive smoke test & E2E guide
 │   ├── LIVE_E2E_TEST_RESULTS.md # E2E smoke test validation record
 │   └── test-data-report.md      # Test results report
+├── infra/                       # Pulumi IaC for AWS resources
+│   ├── __main__.py              # Pulumi entry point
+│   ├── forwarder.py             # Reusable EventBridge→SQS→Lambda pattern
+│   ├── Pulumi.yaml              # Project definition
+│   ├── Pulumi.prod.yaml         # Stack config (encrypted secrets)
+│   └── requirements.txt         # Pulumi Python dependencies
 ├── migrations/
 │   └── 001_add_scoring_columns.sql  # Scoring columns for Postgres (run before deploy)
 ├── ARCHITECTURE.md           # Detailed architecture docs
