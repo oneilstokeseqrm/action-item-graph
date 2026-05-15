@@ -132,6 +132,20 @@ class TestSourceTypeEnum:
     def test_outlook_source_exists(self):
         assert SourceType.OUTLOOK == "outlook"
 
+    def test_generic_source_exists(self):
+        assert SourceType.GENERIC == "generic"
+
+    def test_zoom_source_exists(self):
+        assert SourceType.ZOOM == "zoom"
+
+    def test_envelope_accepts_generic_source(self):
+        envelope = EnvelopeV1.model_validate({**_BASE_ENVELOPE, "source": "generic"})
+        assert envelope.source == SourceType.GENERIC
+
+    def test_envelope_accepts_zoom_source(self):
+        envelope = EnvelopeV1.model_validate({**_BASE_ENVELOPE, "source": "zoom"})
+        assert envelope.source == SourceType.ZOOM
+
 
 class TestEmailEnvelopeParsing:
     def test_parse_email_envelope(self):

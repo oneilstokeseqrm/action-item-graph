@@ -41,6 +41,8 @@ class SourceType(str, Enum):
     EMAIL_PIPELINE = 'email-pipeline'
     GMAIL = 'gmail'
     OUTLOOK = 'outlook'
+    GENERIC = 'generic'
+    ZOOM = 'zoom'
 
 
 class ContentPayload(BaseModel):
