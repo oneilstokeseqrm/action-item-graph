@@ -192,8 +192,15 @@ class TestUpsertDeal:
         assert params['ai_evolution_summary'] == 'Initial qualification call confirmed budget authority'
 
     @pytest.mark.asyncio
-    async def test_upsert_deal_does_not_write_trigger_columns(self, sample_deal):
-        """Must NOT write to the 8 forecast-trigger-protected columns."""
+    async def test_upsert_deal_does_not_write_aig_unowned_columns(self, sample_deal):
+        """Must NOT write to columns AIG does not compute.
+
+        Replaces the older "trigger-protected" test (2026-05-16). Migration 021
+        of opportunity-forecasting made AI extractions intentionally fire the
+        forecast trigger, so the protection rationale no longer applies. The
+        remaining exclusions are columns AIG simply has no upstream source for
+        (or fields that are user-owned only, like lost_reason).
+        """
         from action_item_graph.clients.postgres_client import PostgresClient
 
         client = PostgresClient('postgresql+asyncpg://test')
@@ -204,13 +211,153 @@ class TestUpsertDeal:
 
         call_args = mock_conn.execute.call_args
         sql_text = str(call_args[0][0])
-        trigger_cols = ['stage', 'amount', 'close_date', 'deal_status',
-                        'forecast_category', 'next_step', 'description', 'lost_reason']
-        for col in trigger_cols:
-            # Verify no bare column name writes (meddic_* and dim_* contain
-            # substrings like 'stage' but are distinct columns)
-            # Check the SET clause specifically
-            assert f'"{col}"' not in sql_text or f'meddic_{col}' in sql_text or f'dim_{col}' in sql_text
+        unowned_cols = ['close_date', 'forecast_category', 'next_step',
+                        'description', 'lost_reason']
+        for col in unowned_cols:
+            # No bare-column writes for AIG-unowned fields. The meddic_* and
+            # dim_* columns can incidentally contain these substrings, hence
+            # the disambiguating clauses.
+            bare_write = f':{col}' in sql_text
+            assert not bare_write, f'AIG must not write to {col}, but found `:{col}` in SQL'
+
+    # -----------------------------------------------------------------
+    # Dual-write: stage / amount / deal_status (added 2026-05-16)
+    # Spec: docs/plans/2026-05-16-dual-write-stage-amount-deal-status.md
+    #
+    # The unit tests below assert the SQL shape and bound params. The
+    # @live-db end-to-end behavior (UPDATE preserves user-set deal_status,
+    # NULL passthrough, etc.) is exercised by the spec's verification
+    # SQL queries against Neon — see the spec doc for the runbook.
+    # -----------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_upsert_deal_insert_sets_stage_amount_deal_status(self, sample_deal):
+        """INSERT clause must include stage, amount, and literal deal_status='open'."""
+        from action_item_graph.clients.postgres_client import PostgresClient
+
+        sample_deal.stage = DealStage.NEGOTIATION
+        sample_deal.amount = 240000.0
+
+        client = PostgresClient('postgresql+asyncpg://test')
+        mock_engine, mock_conn, _ = _mock_upsert_engine()
+        client._engine = mock_engine
+
+        await client.upsert_deal(sample_deal)
+
+        call_args = mock_conn.execute.call_args
+        sql_text = str(call_args[0][0])
+        params = call_args[0][1]
+
+        # SQL shape: deal_status appears as a literal 'open' (not :param), so
+        # the only sanity check is that the INSERT mentions it. stage and
+        # amount must appear as bound params.
+        assert 'deal_status' in sql_text
+        assert "'open'" in sql_text
+        assert ':stage_value' in sql_text
+        assert ':amount_value' in sql_text
+
+        # Params dict carries the correct values.
+        assert params['stage_value'] == 'negotiation'
+        assert params['amount_value'] == 240000.0
+
+    @pytest.mark.asyncio
+    async def test_upsert_deal_insert_handles_null_stage_and_amount(self, sample_deal):
+        """NULL stage and NULL amount must pass through as Python None.
+
+        Per the spec's Decision 6 (NULL is a first-class state), the dual-write
+        must not COALESCE-preserve old values or coerce None → 0. Post-
+        construction mutation works because Deal does not enable
+        validate_assignment — assignment skips re-validation.
+        """
+        from action_item_graph.clients.postgres_client import PostgresClient
+
+        sample_deal.stage = None  # type: ignore[assignment]
+        sample_deal.amount = None
+
+        client = PostgresClient('postgresql+asyncpg://test')
+        mock_engine, mock_conn, _ = _mock_upsert_engine()
+        client._engine = mock_engine
+
+        await client.upsert_deal(sample_deal)
+
+        params = mock_conn.execute.call_args[0][1]
+        assert params['stage_value'] is None
+        assert params['amount_value'] is None
+
+    @pytest.mark.asyncio
+    async def test_upsert_deal_update_writes_new_stage_amount(self, sample_deal):
+        """UPDATE branch must rewrite stage and amount to the new values.
+
+        Asserts the ON CONFLICT DO UPDATE SET clause contains stage and amount
+        assignments so subsequent extractions reflect the merger LLM's latest
+        synthesis. The Postgres-level UPDATE semantics (vs. preserving via
+        COALESCE) are exercised by the live-db verification SQL.
+        """
+        from action_item_graph.clients.postgres_client import PostgresClient
+
+        client = PostgresClient('postgresql+asyncpg://test')
+        mock_engine, mock_conn, _ = _mock_upsert_engine()
+        client._engine = mock_engine
+
+        await client.upsert_deal(sample_deal)
+
+        sql_text = str(mock_conn.execute.call_args[0][0])
+        # Two distinct sites the assignments could appear: INSERT VALUES list
+        # and ON CONFLICT DO UPDATE SET. The UPDATE SET site is what makes
+        # subsequent extractions overwrite.
+        update_set_start = sql_text.index('ON CONFLICT')
+        update_clause = sql_text[update_set_start:]
+        assert 'stage = :stage_value' in update_clause
+        assert 'amount = :amount_value' in update_clause
+
+    @pytest.mark.asyncio
+    async def test_upsert_deal_update_preserves_user_set_deal_status(self, sample_deal):
+        """deal_status MUST be INSERT-only — never in the UPDATE SET clause.
+
+        Otherwise a user-set 'closed_won' / 'closed_lost' (from the UI) would
+        revert to 'open' on the next AI extraction. See Decision 5 in the spec.
+        """
+        from action_item_graph.clients.postgres_client import PostgresClient
+
+        client = PostgresClient('postgresql+asyncpg://test')
+        mock_engine, mock_conn, _ = _mock_upsert_engine()
+        client._engine = mock_engine
+
+        await client.upsert_deal(sample_deal)
+
+        sql_text = str(mock_conn.execute.call_args[0][0])
+        update_set_start = sql_text.index('ON CONFLICT')
+        update_clause = sql_text[update_set_start:]
+        # Critical guarantee: deal_status absent from UPDATE SET.
+        assert 'deal_status =' not in update_clause, (
+            'deal_status must not appear in ON CONFLICT DO UPDATE SET — '
+            'user-set closures (closed_won / closed_lost) would be reverted '
+            'by subsequent AI extractions. See spec Decision 5.'
+        )
+
+    @pytest.mark.asyncio
+    async def test_upsert_deal_update_can_clear_amount(self, sample_deal):
+        """Passing amount=None must bind NULL — no COALESCE-preserve.
+
+        The merger LLM owns preservation logic; the dual-write is a straight
+        passthrough. If the merger emits a deal without an amount, Postgres
+        must reflect that.
+        """
+        from action_item_graph.clients.postgres_client import PostgresClient
+
+        sample_deal.amount = None
+
+        client = PostgresClient('postgresql+asyncpg://test')
+        mock_engine, mock_conn, _ = _mock_upsert_engine()
+        client._engine = mock_engine
+
+        await client.upsert_deal(sample_deal)
+
+        params = mock_conn.execute.call_args[0][1]
+        assert params['amount_value'] is None
+        # And no COALESCE shenanigans in the SQL.
+        sql_text = str(mock_conn.execute.call_args[0][0])
+        assert 'COALESCE' not in sql_text.upper() or 'amount' not in sql_text.split('COALESCE')[1].split(')')[0]
 
 
 # ---------------------------------------------------------------------------

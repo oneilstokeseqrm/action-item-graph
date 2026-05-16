@@ -1,9 +1,11 @@
 """
 Postgres (Neon) dual-write client for the Action Item Graph and Deal pipelines.
 
-Mirrors Neo4j writes to Postgres using SQLAlchemy 2.0 async engine + asyncpg.
-Neo4j remains the source of truth; Postgres is a read-optimized projection.
-All writes are failure-isolated — a Postgres failure must never block Neo4j.
+Mirrors writes to Postgres using SQLAlchemy 2.0 async engine + asyncpg.
+Both Postgres and Neo4j are co-equal sources of truth in this system —
+Postgres backs forecast routing / pipeline UI; Neo4j backs graph queries
+and evolution history. All writes are failure-isolated — a Postgres failure
+must never block Neo4j.
 
 Tables written:
 - action_items (UPSERT on graph_action_item_id)
@@ -48,11 +50,27 @@ _STATUS_MAP = {
     'deferred': 'deferred',
 }
 
-# Columns on opportunities table that fire notify_forecast_job() on UPDATE.
-# The Deal dual-write MUST NOT write to these columns.
-_DEAL_TRIGGER_PROTECTED_COLUMNS = frozenset({
-    'stage', 'amount', 'close_date', 'deal_status',
-    'forecast_category', 'next_step', 'description', 'lost_reason',
+# Columns on the opportunities table that AIG does not currently compute.
+#
+# Historical note: this set was originally framed as "trigger-protected"
+# (avoid firing notify_forecast_job() on AI-driven UPDATEs). Migration 021 of
+# opportunity-forecasting
+# (sql/021_extraction_change_trigger_registry_coverage.sql) explicitly
+# extended the trigger to fire on MEDDIC field updates from AI extraction,
+# so AI extractions already fire the forecast trigger today via MEDDIC.
+# The set now means "AIG has no upstream source for these fields" — not
+# "trigger-protected".
+#
+# `stage`, `amount`, and `deal_status` moved OUT of this set on 2026-05-16:
+# AIG does compute stage and amount via the deal_graph merger LLM, and
+# assigns deal_status='open' as the canonical initial state for any
+# AI-extracted deal. See docs/plans/2026-05-16-dual-write-stage-amount-deal-status.md.
+_DEAL_FIELDS_AIG_DOES_NOT_WRITE = frozenset({
+    'close_date',        # target close date — separate extraction scope
+    'forecast_category', # owned by opportunity-forecasting pipeline
+    'next_step',         # user-facing free-form field
+    'description',       # user-facing free-form field
+    'lost_reason',       # only set when a user closes a deal as lost
 })
 
 
@@ -715,7 +733,32 @@ class PostgresClient:
         """Upsert a Deal into the opportunities table.
 
         Conflict resolution on graph_opportunity_id (unique index).
-        Does NOT write to trigger-protected columns (stage, amount, etc.).
+
+        INSERT writes:
+            graph_opportunity_id, tenant_id, account_id, opportunity_name,
+            deal_ref, currency, actual_close_date, deal_status='open' (literal),
+            stage, amount, latest_ai_summary, ai_evolution_summary, all MEDDIC
+            fields, all ontology dim_* fields, ontology_scores_json,
+            ontology_completeness, ontology_version, extraction_embedding,
+            extraction_embedding_current, extraction_confidence,
+            extraction_version, source_interaction_id, qualification_status,
+            source_user_id, ai_workflow_metadata.
+
+        ON CONFLICT UPDATE writes:
+            All of the above EXCEPT deal_status. Keeping deal_status
+            INSERT-only preserves user-set closure values like 'closed_won'
+            against subsequent AI extractions (see spec Decision 5). stage and
+            amount ARE updated on subsequent extractions; the merger LLM
+            handles cross-transcript reasoning and passes through whatever the
+            latest synthesized value is, including NULL when no transcript
+            mentions an amount.
+
+        Does NOT write: close_date (separate scope), forecast_category,
+        next_step, description, lost_reason — see
+        _DEAL_FIELDS_AIG_DOES_NOT_WRITE.
+
+        Both Postgres and Neo4j are sources of truth; this is a straight
+        dual-write of the merger output to both stores.
 
         Returns:
             The Postgres-side ``opportunities.id`` (PK) for FK references.
@@ -727,10 +770,15 @@ class PostgresClient:
         dim_insert_vals = ', '.join(f':{c}' for c in dim_col_names)
         dim_update_set = ', '.join(f'"{c}" = :{c}' for c in dim_col_names)
 
+        # deal_status is INSERT-only (literal 'open'). Omitting it from the
+        # UPDATE SET clause preserves user-set closure values ('closed_won' /
+        # 'closed_lost') across subsequent AI extractions. See spec Decision 5
+        # at docs/plans/2026-05-16-dual-write-stage-amount-deal-status.md.
         sql = f"""
         INSERT INTO opportunities (
             id, graph_opportunity_id, tenant_id, account_id, opportunity_name, deal_ref,
             currency, actual_close_date,
+            deal_status, stage, amount,
             latest_ai_summary, ai_evolution_summary,
             meddic_metrics, meddic_metrics_confidence,
             meddic_economic_buyer, meddic_economic_buyer_confidence,
@@ -748,6 +796,7 @@ class PostgresClient:
         ) VALUES (
             gen_random_uuid(), :graph_opportunity_id, :tenant_id, :account_id, :opportunity_name, :deal_ref,
             :currency, :actual_close_date,
+            'open', :stage_value, :amount_value,
             :latest_ai_summary, :ai_evolution_summary,
             :meddic_metrics, :meddic_metrics_confidence,
             :meddic_economic_buyer, :meddic_economic_buyer_confidence,
@@ -765,6 +814,8 @@ class PostgresClient:
         )
         ON CONFLICT (graph_opportunity_id) DO UPDATE SET
             deal_ref = :deal_ref,
+            stage = :stage_value,
+            amount = :amount_value,
             latest_ai_summary = :latest_ai_summary,
             ai_evolution_summary = :ai_evolution_summary,
             meddic_metrics = :meddic_metrics,
@@ -806,6 +857,14 @@ class PostgresClient:
             'currency': deal.currency or 'USD',
             'actual_close_date': deal.closed_at,
             'deal_ref': deal.deal_ref,
+            # Pass-through of merger output. NULL is a first-class state per
+            # spec Decision 6 — do not COALESCE-preserve old values.
+            #
+            # Deal.model_config sets use_enum_values=True, so `deal.stage` is
+            # a plain string ('qualification', etc.) at runtime, not the
+            # DealStage enum instance. Defense matches line ~900 below.
+            'stage_value': deal.stage.value if isinstance(deal.stage, DealStage) else deal.stage,
+            'amount_value': float(deal.amount) if deal.amount is not None else None,
             'latest_ai_summary': deal.opportunity_summary or None,
             'ai_evolution_summary': deal.evolution_summary or None,
             # MEDDIC
