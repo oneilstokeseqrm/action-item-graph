@@ -836,7 +836,7 @@ Typical processing for a 50KB transcript:
 
 ## Postgres Dual-Write
 
-Both pipelines optionally dual-write to Neon Postgres when `NEON_DATABASE_URL` is set. Neo4j remains the source of truth; Postgres is a read-optimized projection for the frontend.
+Both pipelines optionally dual-write to Neon Postgres when `NEON_DATABASE_URL` is set. **Postgres and Neo4j are co-equal sources of truth** — Postgres backs the pipeline UI (low-latency tRPC reads) and the forecast pipeline's routing decisions, while Neo4j backs graph traversals, evolution history, and embedding search. The dual-write is failure-isolated: a Postgres failure must never block the Neo4j write, and vice versa.
 
 ### Action Item Dual-Write
 
@@ -850,14 +850,20 @@ The DealPipeline optionally dual-writes to Postgres using the same failure-isola
 
 | PostgresClient Method | What It Does |
 |-----------------------|-------------|
-| `upsert_deal` | UPSERTs to `opportunities` table (AI extraction columns only) |
+| `upsert_deal` | UPSERTs to `opportunities` — MEDDIC + ontology + stage + amount + (INSERT-only) deal_status='open' |
 | `insert_deal_version` | Inserts bi-temporal snapshot to `deal_versions` |
 | `link_deal_to_interaction` | UPSERTs to `opportunity_interaction_links` |
 | `persist_deal_full` | Orchestrates all three operations for a single deal |
 
 Failure isolation: Postgres failures never block Neo4j writes. Each operation is individually wrapped in try/except. A failed Postgres write logs a warning but does not affect the pipeline result.
 
-The Deal pipeline does **not** write to the 8 trigger-protected columns on `opportunities` (`stage`, `amount`, `close_date`, `probability`, `forecast_category`, `pipeline_category`, `is_won`, `is_closed`) which are owned by the opportunity-forecasting pipeline.
+The Deal pipeline writes `stage`, `amount`, and `deal_status` to `opportunities` (the merger LLM's output is a straight passthrough, including NULL when no transcript mentions an amount). It does **not** write to 5 fields it has no upstream source for: `close_date` (separate extraction scope), `forecast_category` (owned by opportunity-forecasting), and `next_step` / `description` / `lost_reason` (user-facing free-form fields). See `_DEAL_FIELDS_AIG_DOES_NOT_WRITE` in `src/action_item_graph/clients/postgres_client.py`.
+
+Historical note: pre-2026-05-16 this list was framed as "trigger-protected" — avoid columns watched by `notify_forecast_job()`. Migration `021_extraction_change_trigger_registry_coverage.sql` in opportunity-forecasting made AI extractions intentionally fire the forecast trigger (extending the watched-fields set to include MEDDIC), so the protection rationale no longer applies. The current set is purely "AIG has no upstream source for these fields."
+
+**`deal_status` INSERT-only pattern**: written as a literal `'open'` in the INSERT clause and omitted from the `ON CONFLICT DO UPDATE SET` clause. This preserves user-set closures (`closed_won`, `closed_lost`) from the UI — subsequent AI extractions can't revert them.
+
+**NULL on `stage` / `amount` is a first-class state**. If the merger LLM doesn't surface a value, NULL flows through. Do not COALESCE-preserve in queries downstream — the merger already owns preservation logic via its own cross-transcript reasoning.
 
 ---
 

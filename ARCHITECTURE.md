@@ -169,7 +169,7 @@ See [docs/DEAL_SERVICE_ARCHITECTURE.md](./docs/DEAL_SERVICE_ARCHITECTURE.md) for
 
 ## Postgres Dual-Write (Phase A: Action Items)
 
-The ActionItemPipeline performs a dual-write after Neo4j persistence: extracted data is also written to the eq-frontend Neon Postgres database. Neo4j remains the source of truth; Postgres is a read-optimized projection for the frontend.
+The ActionItemPipeline performs a dual-write after Neo4j persistence: extracted data is also written to the eq-frontend Neon Postgres database. Postgres and Neo4j are **co-equal sources of truth** — Postgres backs forecast routing and pipeline UI (queried at the millisecond level by tRPC procedures), Neo4j backs graph traversals and evolution history. The dual-write is failure-isolated: a Postgres failure must never block the Neo4j write.
 
 ### Architecture
 
@@ -252,7 +252,15 @@ The DealPipeline performs the same dual-write pattern: after Neo4j persistence, 
 
 #### Column Strategy
 
-The Deal pipeline writes only to AI extraction columns on the `opportunities` table. It does **not** write to the 8 trigger-protected columns owned by the opportunity-forecasting pipeline (`stage`, `amount`, `close_date`, `probability`, `forecast_category`, `pipeline_category`, `is_won`, `is_closed`).
+The Deal dual-write writes the merger LLM's output for AI extraction columns AND for `stage` / `amount` / `deal_status`. The historical "trigger-protected" framing (don't write columns watched by `notify_forecast_job()`) was made stale by migration `021_extraction_change_trigger_registry_coverage.sql` in opportunity-forecasting, which intentionally extended the trigger to fire on MEDDIC AI updates. AI extractions are *supposed* to fire forecasts.
+
+Current rules (see `_DEAL_FIELDS_AIG_DOES_NOT_WRITE` in `postgres_client.py`):
+
+- **INSERT** writes: `stage`, `amount`, `deal_status='open'` (literal), all MEDDIC fields, all `dim_*` ontology fields, summaries, embeddings.
+- **ON CONFLICT DO UPDATE** writes: same set **except** `deal_status` — INSERT-only so a user-set `closed_won` / `closed_lost` from the UI is never reverted by subsequent AI extractions.
+- **Never written**: `close_date` (separate extraction scope), `forecast_category` (owned by opportunity-forecasting), `next_step` / `description` / `lost_reason` (user-facing free-form).
+
+NULL is a first-class state for `stage` and `amount`. The merger LLM owns preservation logic; the dual-write is a straight passthrough.
 
 Ontology storage uses the **Option C+** pattern: individual `dim_*` columns for each ontology dimension, a JSONB `ontology_scores_json` column for programmatic access, and a scalar `ontology_completeness` field for fast filtering. MEDDIC fields follow the same pattern with `meddic_*` columns and `meddic_completeness`.
 

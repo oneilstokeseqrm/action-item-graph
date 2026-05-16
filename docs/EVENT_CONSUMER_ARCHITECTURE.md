@@ -1166,7 +1166,7 @@ Publishers set `detail-type` based on the interaction type:
 | **`log_event=False`** | Prevents full transcript/email content from appearing in CloudWatch logs (privacy, cost). |
 | **Stub `__init__.py` in Lambda zip** | The real package `__init__.py` eagerly imports pipeline code with heavy deps. The stub prevents import crashes in the Lambda environment. |
 | **`raise_on_entire_batch_failure=False`** | Partial failure mode: if one record fails in a batch, only that record is retried. (Moot with `BatchSize=1` but future-proofs for batching.) |
-| **Postgres dual-write is optional** | If `NEON_DATABASE_URL` is empty or connectivity fails, the service runs without Postgres. Neo4j is the primary store — Postgres is a projection that must never block the main write path. |
+| **Postgres dual-write is optional** | If `NEON_DATABASE_URL` is empty or connectivity fails, the service runs without Postgres. Both stores are co-equal sources of truth in production, but the Neo4j write is the *primary* write in the consumer flow — Postgres failures must never block Neo4j progress (and the inverse). Operating without Postgres is supported for development / disaster scenarios but degrades the pipeline UI's view of recent extractions. |
 
 ---
 
