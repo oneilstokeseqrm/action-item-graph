@@ -63,3 +63,4 @@ logs/
 
 # Claude Code
 .claude/
+.gstack/

@@ -239,8 +239,9 @@ nodes via defensive MERGE:
 - Both pipelines run concurrently via `EnvelopeDispatcher` with fault isolation
 - Both pipelines optionally dual-write to Neon Postgres when `NEON_DATABASE_URL` is set:
   - Action Items: `action_items`, `action_item_versions`, `action_item_topics`, `action_item_topic_memberships`, `action_item_owners`
-  - Deals: `opportunities` table (AI extraction columns: MEDDIC, ontology dimensions, embeddings) + `deal_versions` table (bi-temporal snapshots)
-  - Deal writes are coordinated with the opportunity-forecasting pipeline to avoid trigger-protected columns (`stage`, `amount`, `close_date`, etc.)
+  - Deals: `opportunities` table (MEDDIC, ontology dimensions, embeddings, plus `stage`, `amount`, and `deal_status='open'` on first INSERT) + `deal_versions` table (bi-temporal snapshots)
+  - Postgres and Neo4j are co-equal sources of truth; Postgres backs forecast routing + pipeline UI, Neo4j backs graph queries + evolution history
+  - The AIG Deal dual-write deliberately skips 5 columns owned elsewhere: `close_date` (separate scope), `forecast_category` (owned by opportunity-forecasting), `next_step` / `description` / `lost_reason` (user-facing free-form). See `_DEAL_FIELDS_AIG_DOES_NOT_WRITE` in `postgres_client.py`.
 
 ## Architecture
 

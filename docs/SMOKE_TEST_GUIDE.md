@@ -532,7 +532,7 @@ SHOW CONSTRAINTS YIELD name, type RETURN name, type ORDER BY name
 
 ### Overview
 
-The Action Item pipeline performs a **dual-write** to both Neo4j (source of truth) and Neon Postgres (read-optimized projection). The Postgres write is failure-isolated — it never blocks the Neo4j write. The live E2E script (`scripts/run_live_e2e.py`) automatically verifies Postgres data when `NEON_DATABASE_URL` is set.
+The Action Item pipeline performs a **dual-write** to both Neo4j and Neon Postgres. Both stores are co-equal sources of truth (Postgres backs the pipeline UI and forecast routing; Neo4j backs graph traversals and evolution history). The Postgres write is failure-isolated — it never blocks the Neo4j write, and vice versa. The live E2E script (`scripts/run_live_e2e.py`) automatically verifies Postgres data when `NEON_DATABASE_URL` is set.
 
 ### Required Environment Variable
 
