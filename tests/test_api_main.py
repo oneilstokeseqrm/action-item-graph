@@ -1,11 +1,26 @@
 """Tests for the FastAPI app startup/shutdown and route wiring."""
 
-import pytest
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
+
 from fastapi.testclient import TestClient
 
 
+@asynccontextmanager
+async def _noop_dbos_lifespan(app):
+    """No-op replacement for ``dbos_lifespan`` in tests.
+
+    The real ``dbos_lifespan`` calls ``DBOS.launch()`` which opens a
+    Postgres connection to ``DBOS_SYSTEM_DATABASE_URL``. Tests don't want
+    to depend on a live DBOS state DB; they replace the lifespan with
+    this no-op.
+    """
+    del app
+    yield
+
+
 class TestAppRouteWiring:
+    @patch("action_item_graph.api.main.dbos_lifespan", _noop_dbos_lifespan)
     @patch("action_item_graph.api.main.get_settings")
     @patch("action_item_graph.api.main.Neo4jClient")
     @patch("action_item_graph.api.main.DealNeo4jClient")
@@ -32,6 +47,7 @@ class TestAppRouteWiring:
         # Lifespan sets up app.state.neo4j, health route calls verify_connectivity
         assert resp.status_code in (200, 503)
 
+    @patch("action_item_graph.api.main.dbos_lifespan", _noop_dbos_lifespan)
     @patch("action_item_graph.api.main.get_settings")
     @patch("action_item_graph.api.main.Neo4jClient")
     @patch("action_item_graph.api.main.DealNeo4jClient")

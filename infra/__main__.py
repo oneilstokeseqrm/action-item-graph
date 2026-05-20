@@ -17,6 +17,14 @@ config = pulumi.Config()
 worker_api_key = config.require_secret("worker-api-key")
 api_base_url = config.require("api-base-url")
 
+# DBOS system database connection (direct, non-pooler) for DBOSClient.enqueue
+# from the Lambda. Must be set before `pulumi up`:
+#   pulumi config set --secret dbos-system-database-url \
+#     "postgresql://<role>:<pw>@<ep_id>.<region>.aws.neon.tech/eq_aig_dbos_sys?sslmode=require"
+# The hostname MUST NOT contain "-pooler"; Neon's pooler breaks DBOS advisory
+# locks. See docs/plans/2026-05-20-dbos-migration-execution-plan.md (T4/T5).
+dbos_system_database_url = config.require_secret("dbos-system-database-url")
+
 # ── Create the Forwarder Stack ──
 outputs = create_forwarder_stack(
     service_name="action-item-graph",
@@ -39,7 +47,10 @@ outputs = create_forwarder_stack(
         "MAX_RETRIES": "2",
         "POWERTOOLS_SERVICE_NAME": "action-item-graph-ingest",
     },
-    secrets={"worker-api-key": worker_api_key},
+    secrets={
+        "worker-api-key": worker_api_key,
+        "dbos-system-database-url": dbos_system_database_url,
+    },
     rule_description="Routes transcript and email events to action-item-graph SQS queue",
     # Defaults match live config: 720s visibility, 3 max receives, 256MB, 120s timeout
 )
@@ -53,4 +64,19 @@ pulumi.export("lambda_arn", outputs.lambda_arn)
 pulumi.export("lambda_name", outputs.lambda_name)
 pulumi.export("role_arn", outputs.role_arn)
 pulumi.export("rule_arn", outputs.rule_arn)
-pulumi.export("secret_arn", outputs.secret_arn)
+
+# Per-secret ARN exports — replaces the ambiguous "first secret" alias.
+# Each Pulumi config key in the secrets dict gets its own export named
+# ``<key>_secret_arn``. External consumers (CI, ops tooling) read these
+# explicitly instead of inferring from a positional default.
+for secret_key, secret_arn in outputs.secret_arns_by_name.items():
+    pulumi.export(f"{secret_key}_secret_arn", secret_arn)
+
+# DEPRECATED: `secret_arn` was the historical single-secret export. It
+# implicitly meant the worker-api-key ARN (the only secret pre-migration).
+# Kept as an alias so external consumers don't break on the cutover; once
+# all consumers have migrated to the explicit `worker-api-key_secret_arn`
+# export, this can be removed (planned with Phase 3 cleanup, T31).
+_worker_api_key_arn = outputs.secret_arns_by_name.get("worker-api-key")
+if _worker_api_key_arn is not None:
+    pulumi.export("secret_arn", _worker_api_key_arn)

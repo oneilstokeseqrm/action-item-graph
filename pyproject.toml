@@ -12,8 +12,10 @@ dependencies = [
     "numpy>=1.26.0",
     "structlog>=24.0.0",
     "fastuuid>=0.14",
-    "sqlalchemy[asyncio]>=2.0.0",
+    "sqlalchemy[asyncio]>=2.0.43",
     "asyncpg>=0.29.0",
+    "dbos>=2.22.0,<3.0",
+    "psycopg[binary]>=3.2.0",
 ]
 
 [project.optional-dependencies]
