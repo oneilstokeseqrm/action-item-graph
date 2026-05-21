@@ -9,6 +9,7 @@ from action_item_graph.clients.neo4j_client import Neo4jClient
 from action_item_graph.clients.openai_client import OpenAIClient
 from action_item_graph.clients.postgres_client import PostgresClient
 from action_item_graph.dbos_runtime import dbos_lifespan
+from action_item_graph.workflows import WorkflowClients, register_clients
 from deal_graph.clients.neo4j_client import DealNeo4jClient
 
 from .config import get_settings
@@ -84,9 +85,21 @@ async def lifespan(app: FastAPI):
         app.state.openai = openai
         app.state.postgres = postgres
 
-        # DBOS launches here, AFTER app.state is populated. Recovery threads
-        # pick up any in-flight workflows from the previous container and find
-        # clients ready on app.state.
+        # Register clients in the DBOS workflows module-level registry BEFORE
+        # DBOS.launch() so recovery threads picking up in-flight workflows can
+        # resolve clients via ``get_clients()``. Step functions cannot reach
+        # ``app.state`` (they're not bound to a request); the registry is the
+        # equivalent of LTF's ``get_async_session`` pattern.
+        register_clients(WorkflowClients(
+            neo4j=neo4j,
+            deal_neo4j=deal_neo4j,
+            openai=openai,
+            postgres=postgres,
+        ))
+
+        # DBOS launches here, AFTER app.state + workflow registry populated.
+        # Recovery threads pick up any in-flight workflows from the previous
+        # container and find clients ready via get_clients().
         async with dbos_lifespan(app):
             logger.info("lifespan.ready")
             try:

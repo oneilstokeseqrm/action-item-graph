@@ -364,7 +364,20 @@ class ActionItemPipeline:
                         tenant_id, account_id,
                         contacts=envelope.contacts,
                     )
-                    await owner_resolver.resolve_batch(extraction.action_items)
+                    # resolve_batch returns NEW ActionItem instances; replace
+                    # extraction's items rather than mutating in place
+                    # (Open #1 — DBOS replay safety). Matches the existing
+                    # verifier.verify_batch convention of returning a new
+                    # ExtractionOutput.
+                    resolved_items, _ = await owner_resolver.resolve_batch(
+                        extraction.action_items
+                    )
+                    extraction = ExtractionOutput(
+                        interaction=extraction.interaction,
+                        action_items=resolved_items,
+                        raw_extractions=extraction.raw_extractions,
+                        extraction_notes=extraction.extraction_notes,
+                    )
 
                 # Build contact_map for downstream owner→contact linking
                 contact_map: dict[str, str] = {}
@@ -614,7 +627,18 @@ class ActionItemPipeline:
                     self.repository, self.openai,
                 )
                 await owner_resolver.load_cache(tenant_id, account_id)
-                await owner_resolver.resolve_batch(extraction.action_items)
+                # resolve_batch returns NEW ActionItem instances; replace
+                # extraction's items rather than mutating in place
+                # (Open #1 — DBOS replay safety).
+                resolved_items, _ = await owner_resolver.resolve_batch(
+                    extraction.action_items
+                )
+                extraction = ExtractionOutput(
+                    interaction=extraction.interaction,
+                    action_items=resolved_items,
+                    raw_extractions=extraction.raw_extractions,
+                    extraction_notes=extraction.extraction_notes,
+                )
 
             # Create Interaction in graph
             with timer.stage("create_interaction"):

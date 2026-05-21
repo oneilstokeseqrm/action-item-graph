@@ -201,6 +201,118 @@ The 2-week rollback window starts when Phase 2 deploys (T29). Phase 3 (T31 — d
 
 ---
 
+## Phase E test-coverage backlog (from B-1 codex absorption)
+
+T22 (action-item workflow tests) + T23 (deal workflow tests) in Phase E are
+where this list gets implemented. Enumerated explicitly so the Phase E
+session doesn't have to re-derive it.
+
+### Workflow runtime (`workflows/_runtime.py`)
+
+- [ ] `get_clients()` raises ``RuntimeError`` if called before
+      ``register_clients()`` (and the error message names the registry
+      contract clearly).
+- [ ] ``reset_clients_for_testing()`` clears state so two test fixtures
+      don't see each other's mocks.
+- [ ] ``WorkflowClients`` rejects mutation (frozen dataclass) — a step
+      can't accidentally rebind ``clients.neo4j = other_client``.
+
+### Serialization (`workflows/_serialization.py`)
+
+- [ ] Round-trip identity for each type:
+      ``extraction_to_dict(extraction_from_dict(extraction_to_dict(e))) ==
+      extraction_to_dict(e)``. Same shape for MatchResult, MergeResult,
+      TopicResolutionResult, TopicExecutionResult.
+- [ ] ``json.dumps(to_dict(obj))`` succeeds for every type — no UUID,
+      datetime, or tuple leaking past the boundary.
+- [ ] MatchResult ``decisions`` tuples flatten + reconstruct correctly
+      (the flattening is the easy bug to break in a future refactor).
+- [ ] TopicResolutionResult ``llm_decision`` stuffed-back-as-dict path
+      doesn't crash the executor (currently we lose type info; that's
+      intentional, but a test pins the contract).
+
+### Action-item steps (`workflows/action_item_steps.py`) — 14 step functions
+
+- [ ] **S1 ensure_account_step** — happy path (Account MERGE'd).
+- [ ] **S2 extraction_step** — returns ExtractionOutput-shaped dict.
+- [ ] **S3 consolidation_step** — returns dict with both
+      ``extraction`` + ``items_consolidated``.
+- [ ] **S4 verification_step** — fail-open branch: when verifier raises,
+      step returns ``status='skipped'`` and forwards the original
+      extraction unmodified.
+- [ ] **S5 owner_resolution_step** — returns NEW extraction with resolved
+      owners (no in-place mutation visible to caller).
+- [ ] **S6 create_interaction_step** — Neo4j MERGE called once per
+      interaction.
+- [ ] **S7 merge_contacts_to_deal_step** — three paths: ``no_op`` (no
+      opportunity_id / no contacts), ``ok`` (happy path with contact
+      IDs), ``skipped`` (helper raises, broad-except absorbs).
+- [ ] **S8 matching_step** — returns dict with ``match_results`` +
+      ``filtered_action_items`` aligned 1:1.
+- [ ] **S9a merging_llm_step** — returns ``None`` for non-merge actions;
+      returns LLM dict for merge actions. Alignment preserved 1:1.
+- [ ] **S9b merging_persist_step** — 4-branch dispatch (create_new /
+      update_status / merge with S9a payload / link_related). The
+      length-assertion guard raises with a clear message when lists
+      drift.
+- [ ] **S10a topic_resolution_llm_step** — ``_action_item_context``
+      envelope carries ``action_item_text`` + ``owner`` per-item.
+      Crucially: the values come from ``m.extracted_item``, NOT from
+      ``action_item.*`` (parity with legacy pipeline.py:870-905).
+- [ ] **S10b topic_resolution_persist_step** — parses
+      ``_action_item_context`` and passes to TopicExecutor.execute_batch
+      tuples correctly.
+- [ ] **S13 postgres_dual_write_step** — three paths (``no_op`` no
+      postgres client, ``ok``, ``skipped`` on exception).
+- [ ] **S14 agent_outbox_step** — uses ``interaction.interaction_id``
+      (from the extraction-produced Interaction passed as 4th arg), NOT
+      ``envelope.interaction_id``.
+
+### Workflow orchestration (`workflows/action_item_workflow.py`)
+
+- [ ] Validation gate: missing ``envelope.account_id`` raises
+      ``ValidationError`` BEFORE any @DBOS.step is invoked (so the error
+      isn't retry-wrapped).
+- [ ] Authoritative ``interaction_id``: the value returned/logged uses
+      ``extraction_dict.interaction.interaction_id``, not
+      ``envelope.interaction_id``, even when the envelope lacked one.
+- [ ] Early-return paths (``no_items``, ``all_filtered``) use the
+      authoritative interaction_id.
+- [ ] ``enable_topics=False`` skips S10a/S10b entirely.
+- [ ] 14 steps called in the order S1→S2→S3→S4→S5→S6→S7→S8→S9a→S9b
+      →S10a→S10b→S13→S14 (a sequencing test against a recorded mock).
+
+### Merger refactor (`pipeline/merger.py`)
+
+- [ ] ``construct_merged_action_item_llm()`` returns dict with
+      ``merged`` + ``new_embedding`` fields; new_embedding only
+      populated when ``should_update_embedding`` is true.
+- [ ] ``persist_merged_action_item_neo4j()`` consumes the dict and
+      writes version_snapshot + update_action_item + link_to_interaction
+      + owner link (if changed).
+- [ ] ``_merge_items()`` (legacy path) still produces identical
+      MergeResult as before the refactor — regression-test the integrated
+      behavior.
+
+### Lifespan integration (`api/main.py`)
+
+- [ ] Lifespan calls ``register_clients(WorkflowClients(...))`` BEFORE
+      entering ``dbos_lifespan(app)``.
+- [ ] If client setup raises, ``register_clients`` is NOT called (no
+      stale references in registry).
+- [ ] Workflow steps can resolve clients via ``get_clients()`` once
+      lifespan has reached its yield point.
+
+### Crash-recovery (DBOS-specific)
+
+- [ ] Kill Railway container mid-workflow; verify resumption from the
+      last checkpointed step (canonical T24 scenario from the plan).
+- [ ] Duplicate-enqueue rejection: enqueue same workflow_id twice;
+      second call raises ``DBOSDuplicateWorkflowError`` (Open #3
+      V1 stance).
+
+---
+
 ## Known-deferred test failures (pre-existing on main)
 
 `tests/test_lambda_handler.py` and `tests/test_lambda_secrets.py` fail at collection time with `ModuleNotFoundError: No module named 'aws_lambda_powertools'` (and `boto3`). These libraries are installed into the Lambda zip by `scripts/package_lambda.sh` but are NOT in the project's `pyproject.toml` dev/api dependencies, so the local test runner can't import the Lambda handler modules.

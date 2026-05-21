@@ -300,30 +300,32 @@ class ActionItemMerger:
             },
         )
 
-    async def _merge_items(
+    async def construct_merged_action_item_llm(
         self,
-        existing_id: str,
         existing_props: dict[str, Any],
         extraction: ExtractedActionItem,
-        interaction: Interaction,
-        action_item: ActionItem,
-    ) -> MergeResult:
+    ) -> dict[str, Any]:
         """
-        Merge a new extraction into an existing ActionItem using LLM synthesis.
+        Pure-LLM phase of merging (no Neo4j writes).
 
-        Args:
-            existing_id: ID of existing ActionItem to update
-            existing_props: Current properties of the existing item
-            extraction: The new extraction to merge in
-            interaction: Source interaction
-            action_item: ActionItem model (has embeddings)
+        Calls the synthesis LLM to construct a ``MergedActionItem`` and,
+        if the model indicates the content changed enough, an updated
+        embedding. Returns a serializable dict so the result can be
+        DBOS-checkpointed and consumed by
+        :meth:`persist_merged_action_item_neo4j` as a separate step.
+
+        Codex Phase B review absorbed #10: a single ``_merge_items``
+        method that mixed LLM and Neo4j-write meant a retry could
+        produce divergent ``MergedActionItem`` outputs while Neo4j had
+        partial writes from the prior attempt. Splitting LLM from
+        persist lets DBOS checkpoint the LLM output once; retries reuse
+        the cached output.
 
         Returns:
-            MergeResult for the merge
+            Dict containing:
+              - ``merged``: ``MergedActionItem.model_dump()`` output
+              - ``new_embedding``: list[float] if regenerated, else None
         """
-        tenant_id = action_item.tenant_id
-
-        # Build merge prompt and get synthesized result
         messages = build_merge_prompt(
             existing_text=existing_props.get('action_item_text', ''),
             existing_summary=existing_props.get('summary', ''),
@@ -351,6 +353,37 @@ class ActionItemMerger:
             response_model=MergedActionItem,
         )
 
+        new_embedding: list[float] | None = None
+        if merged.should_update_embedding:
+            new_embedding = await self.openai.create_embedding(merged.action_item_text)
+
+        return {
+            'merged': merged.model_dump(),
+            'new_embedding': new_embedding,
+        }
+
+    async def persist_merged_action_item_neo4j(
+        self,
+        *,
+        llm_result: dict[str, Any],
+        existing_id: str,
+        existing_props: dict[str, Any],
+        interaction: Interaction,
+        action_item: ActionItem,
+    ) -> MergeResult:
+        """
+        Pure-Neo4j-write phase of merging (no LLM calls).
+
+        Consumes the dict produced by
+        :meth:`construct_merged_action_item_llm` and applies the writes:
+        version snapshot, update_action_item, link_to_interaction, and
+        owner link if changed. Idempotent under retry because all Neo4j
+        operations are MERGE-keyed.
+        """
+        merged = MergedActionItem.model_validate(llm_result['merged'])
+        new_embedding = llm_result.get('new_embedding')
+        tenant_id = action_item.tenant_id
+
         # Create version snapshot before update
         await self.repository.create_version_snapshot(
             action_item_id=existing_id,
@@ -376,13 +409,12 @@ class ActionItemMerger:
                 ActionItemStatus.OPEN,
             ).value
 
-        # Update embedding_current if content changed significantly
-        if merged.should_update_embedding:
-            new_embedding = await self.openai.create_embedding(merged.action_item_text)
+        # Apply pre-computed embedding (if the LLM step produced one)
+        if new_embedding is not None:
             updates['embedding_current'] = new_embedding
 
         # Apply updates
-        updated = await self.repository.update_action_item(
+        await self.repository.update_action_item(
             action_item_id=existing_id,
             tenant_id=tenant_id,
             updates=updates,
@@ -416,9 +448,39 @@ class ActionItemMerger:
             linked_interaction_id=str(interaction.interaction_id),
             details={
                 'evolution_summary': merged.evolution_summary,
-                'embedding_updated': merged.should_update_embedding,
+                'embedding_updated': new_embedding is not None,
                 'status_changed': merged.implied_status is not None,
             },
+        )
+
+    async def _merge_items(
+        self,
+        existing_id: str,
+        existing_props: dict[str, Any],
+        extraction: ExtractedActionItem,
+        interaction: Interaction,
+        action_item: ActionItem,
+    ) -> MergeResult:
+        """
+        Merge a new extraction into an existing ActionItem using LLM synthesis.
+
+        Implemented as a sequential call to
+        :meth:`construct_merged_action_item_llm` followed by
+        :meth:`persist_merged_action_item_neo4j`. The legacy
+        ``/process`` HTTP route enters here; the DBOS workflow path
+        calls the two methods directly as S9a + S9b steps, gaining
+        per-step retry isolation.
+        """
+        llm_result = await self.construct_merged_action_item_llm(
+            existing_props=existing_props,
+            extraction=extraction,
+        )
+        return await self.persist_merged_action_item_neo4j(
+            llm_result=llm_result,
+            existing_id=existing_id,
+            existing_props=existing_props,
+            interaction=interaction,
+            action_item=action_item,
         )
 
     async def _create_and_link(
