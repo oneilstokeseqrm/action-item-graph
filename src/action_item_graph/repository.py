@@ -337,9 +337,18 @@ class ActionItemRepository:
         tenant_id: UUID,
         change_summary: str,
         source_interaction_id: UUID | None = None,
+        extraction_disambiguator: str | None = None,
     ) -> dict[str, Any]:
         """
         Create a version snapshot before updating an ActionItem.
+
+        Idempotent under retry: the ``version_id`` is deterministic per
+        ``(action_item_id, source_interaction_id, ai.version)``, and the
+        Cypher uses MERGE so a retry returns the existing snapshot
+        instead of duplicating. The Phase B-2 codex review caught the
+        prior ``CREATE { version_id: randomUUID() }`` shape as a
+        DBOS-retry hazard — see
+        ``memory/pattern_dbos_workflow_parity_rules.md`` Rule 6.
 
         This preserves the current state as an ActionItemVersion node.
 
@@ -352,24 +361,43 @@ class ActionItemRepository:
         Returns:
             Created ActionItemVersion node properties
         """
+        # Deterministic version_id for DBOS-retry idempotency. UUID5 over
+        # (action_item_id, source_interaction_id, extraction_disambiguator)
+        # gives a stable ID across retries. ``extraction_disambiguator``
+        # distinguishes two distinct merges of the SAME action item from
+        # the SAME interaction (Codex B-2 R3 absorption). Callers should
+        # pass a content-derived hash of the upstream extracted object
+        # (see ``ActionItemMerger._extraction_content_hash``) so two
+        # extractions sharing one field but differing on others get
+        # distinct snapshots. Without a disambiguator the key collapses
+        # to (action_item, interaction) — safe for the
+        # 1-merge-per-interaction common case + all retry patterns. See
+        # ``memory/pattern_dbos_workflow_parity_rules.md`` Rule 6.
+        import uuid as _uuid_module
+
+        version_id = str(_uuid_module.uuid5(
+            _uuid_module.NAMESPACE_URL,
+            f'aig-version:{action_item_id}:'
+            f'{source_interaction_id or "none"}:'
+            f'{extraction_disambiguator or ""}',
+        ))
+
         query = """
             MATCH (ai:ActionItem {action_item_id: $action_item_id, tenant_id: $tenant_id})
-            CREATE (v:ActionItemVersion {
-                version_id: randomUUID(),
-                action_item_id: ai.action_item_id,
-                tenant_id: ai.tenant_id,
-                version: ai.version,
-                action_item_text: ai.action_item_text,
-                summary: ai.summary,
-                owner: ai.owner,
-                status: ai.status,
-                due_date: ai.due_date,
-                change_summary: $change_summary,
-                change_source_interaction_id: $source_interaction_id,
-                created_at: datetime(),
-                valid_from: ai.created_at,
-                valid_until: datetime()
-            })
+            MERGE (v:ActionItemVersion {version_id: $version_id, tenant_id: $tenant_id})
+            ON CREATE SET
+                v.action_item_id = ai.action_item_id,
+                v.version = ai.version,
+                v.action_item_text = ai.action_item_text,
+                v.summary = ai.summary,
+                v.owner = ai.owner,
+                v.status = ai.status,
+                v.due_date = ai.due_date,
+                v.change_summary = $change_summary,
+                v.change_source_interaction_id = $source_interaction_id,
+                v.created_at = datetime(),
+                v.valid_from = ai.created_at,
+                v.valid_until = datetime()
             MERGE (ai)-[:HAS_VERSION]->(v)
             RETURN v {.*} as version
         """
@@ -378,6 +406,7 @@ class ActionItemRepository:
             {
                 'action_item_id': action_item_id,
                 'tenant_id': str(tenant_id),
+                'version_id': version_id,
                 'change_summary': change_summary,
                 'source_interaction_id': str(source_interaction_id)
                 if source_interaction_id

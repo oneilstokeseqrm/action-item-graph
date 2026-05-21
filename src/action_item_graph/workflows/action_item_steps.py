@@ -459,12 +459,16 @@ async def merging_persist_step(
                         f'merging_persist_step: missing S9a payload for merge '
                         f'decision on action_item_id={candidate.action_item_id}'
                     )
+                # Pass the ExtractedActionItem so create_version_snapshot
+                # can disambiguate two distinct merges of the same
+                # existing item from the same interaction (Codex B-2 R2).
                 result = await merger.persist_merged_action_item_neo4j(
                     llm_result=llm_result,
                     existing_id=candidate.action_item_id,
                     existing_props=candidate.node_properties,
                     interaction=interaction,
                     action_item=action_item,
+                    extraction=m.extracted_item,
                 )
             elif decision.merge_recommendation == 'link_related':
                 result = await merger._create_and_link(

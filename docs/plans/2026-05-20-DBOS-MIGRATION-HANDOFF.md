@@ -94,6 +94,7 @@ Ran the plan-eng-review skill. Goal: lock the 23 open questions into specific de
 | **State DB** = Separate Neon database `eq_aig_dbos_sys` in existing `super-glitter-11265514` (eq-dev) project | Locked | Plan's literal wording ("database" not "project") + matches LTF's pattern (their DBOS state lives in `neondb.dbos.*` inside the same `eq-dev` project). Clean ownership via distinct database; LTF and AIG have separate `dbos.workflow_status` tables. Migrating up to a dedicated project later is feasible. | None — separation is a one-way decision. Upgrade to dedicated project only if shared compute or cross-service `pg_database_size` quota pressure shows up. |
 | **Cutover** = 3-phase migration | Locked | Phase 1 (deploy DBOS infra + new Railway with /process alive) → Phase 2 (shift Lambda traffic) → Phase 3 (Day 14+, delete /process) | Phase 3 timing extends if any incidents in Phase 2 |
 | **Workflow ID format** = `f"action-item-graph:{pipeline}:interaction-{uuid}"` | Locked at base | Verified against DBOS validator at v2.22.0 | Future-enhancement: append retry-attempt-id suffix if FAILED re-delivery requires fresh attempt (Open #3) |
+| **Open #3 — Workflow ID dedupe on FAILED re-delivery** (V1 stance, settled in B-2 2026-05-21) | Locked at V1 | Re-delivery of a FAILED workflow re-uses the same workflow_id; DBOSClient.enqueue raises `DBOSDuplicateWorkflowError` on the second attempt. Recovery requires operator-triggered re-run via admin endpoint OR manual SQL: `UPDATE dbos.workflow_status SET status='ENQUEUED' WHERE workflow_id = ...`. The workflow body is idempotent under retry (all writes are MERGE-keyed / ON CONFLICT-keyed), so the operator-triggered re-run is safe. | Future enhancement (deferred until operationally annoying): append retry-attempt-id suffix to workflow_id so DBOS treats each re-delivery as a fresh attempt without operator intervention. Trigger: if >5 FAILED re-deliveries in a 30-day window require manual operator action. |
 
 ---
 
@@ -310,6 +311,71 @@ session doesn't have to re-derive it.
 - [ ] Duplicate-enqueue rejection: enqueue same workflow_id twice;
       second call raises ``DBOSDuplicateWorkflowError`` (Open #3
       V1 stance).
+
+---
+
+## Known limitations (deferred follow-ups from B-2 codex)
+
+The B-2 repository-idempotency sweep (Rule 6 absorption — see
+``memory/pattern_dbos_workflow_parity_rules.md``) fixed the
+highest-frequency retry hazard (version-snapshot creates in both
+repositories) but identified three lower-priority follow-ups that
+were intentionally deferred from the B-2 commit to keep scope tight.
+Each is a real DBOS-retry-safety concern but bounded enough to ship
+as-is.
+
+### 1. Version counter compare-and-set
+
+``update_action_item`` and ``update_deal`` increment the ``version``
+field via ``SET ai.version = ai.version + 1`` (and analogous for
+``Deal``). Under DBOS retry: a failed-mid-update step's retry would
+increment ``version`` a second time, producing version=N+2 when the
+intended end-state was version=N+1. The historical record
+(ActionItemVersion / DealVersion) is correct thanks to the idempotent
+snapshot fix, but downstream consumers comparing version numbers
+across snapshots would see a gap.
+
+**Fix (future):** add ``WHERE ai.version = $expected_version`` to the
+update Cypher and pass the captured pre-update version from the
+merger. On retry the WHERE fails, no SET happens, and the persist
+step's idempotency is complete.
+
+**Why deferred:** legacy /process has the same off-by-one under SQS
+redelivery so it's not a DBOS-introduced regression. Best fixed in a
+dedicated commit alongside the value of CAS for the data layer rather
+than buried in B-2.
+
+### 2. Owner / TopicVersion CREATE races
+
+``ActionItemRepository.resolve_or_create_owner`` and
+``ActionItemRepository._create_topic_version`` both use
+``CREATE { id: randomUUID() }`` after a read-then-create check. Two
+concurrent DBOS workflows OR a step retry could race on the
+read-then-create and produce duplicate Owner / ActionItemTopicVersion
+nodes.
+
+**Fix (future):** convert to MERGE keyed on
+``(tenant_id, canonical_name)`` for Owner, and a deterministic ID
+derived from the topic + interaction for ActionItemTopicVersion.
+
+**Why deferred:** the race window is narrow (Neo4j read+CREATE in
+~10ms), Owner duplicates are recoverable via a one-shot dedup query,
+and TopicVersion duplicates don't corrupt downstream behavior (the
+topic itself is MERGE-keyed). Phase E live-traffic monitoring will
+catch this if it surfaces in production; if so, the fix is
+straightforward.
+
+### 3. Per-step instrumentation for S9a/S9b asymmetry
+
+S9a (``merging_llm_step``) runs only for the "merge" decision branch
+(typically ~30% of match_results in steady-state). S9b
+(``merging_persist_step``) runs for every match_result. Operational
+dashboards showing per-step invocation counts will naturally show S9a
+< S9b, which is correct, not a bug.
+
+**Fix (future):** if alerting is configured per-step, the asymmetry
+should be encoded in dashboard query OR alert thresholds. Codex B-1
+R1 flagged this preemptively.
 
 ---
 

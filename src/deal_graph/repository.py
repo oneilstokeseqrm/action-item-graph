@@ -328,6 +328,7 @@ class DealRepository:
         change_summary: str,
         changed_fields: list[str],
         change_source_interaction_id: UUID | None = None,
+        extraction_disambiguator: str | None = None,
     ) -> dict[str, Any]:
         """
         Create a DealVersion snapshot before updating a Deal.
@@ -341,18 +342,53 @@ class DealRepository:
             change_summary: LLM-generated narrative of why the deal changed
             changed_fields: List of property names that will change
             change_source_interaction_id: Interaction that triggered this change
+            extraction_disambiguator: Optional caller-provided string that
+                differentiates two merge attempts of the SAME deal from
+                the SAME interaction. Callers should pass a content-
+                derived hash of the upstream ExtractedDeal (see
+                ``DealMerger._deal_extraction_content_hash``) so two
+                extractions sharing opportunity_name but differing on
+                stage/MEDDIC fields/amount get distinct snapshots.
+                Codex B-2 R3 absorption.
 
         Returns:
             Created DealVersion node properties
         """
+        # Deterministic version_id for DBOS-retry idempotency. UUID5 over
+        # (opportunity_id, change_source_interaction_id,
+        # extraction_disambiguator) gives a stable ID across retries —
+        # MERGE on version_id then no-ops on the second attempt instead
+        # of duplicating a DealVersion row.
+        #
+        # ``extraction_disambiguator`` distinguishes two distinct merges
+        # of the same existing deal from the same envelope (e.g., two
+        # extracted deals that resolve to one opportunity_id; Codex B-2
+        # R2 caught this collapse). When the caller passes a non-empty
+        # disambiguator (typically the ExtractedDeal.opportunity_name),
+        # the two snapshots get distinct version_ids and both persist.
+        # Without it, the key falls back to (opportunity_id,
+        # source_interaction_id) which is correct for the common
+        # 1-merge-per-(opportunity,interaction) case.
+        #
+        # See ``memory/pattern_dbos_workflow_parity_rules.md`` Rule 6.
+        import uuid as _uuid_module
+
+        version_id = str(_uuid_module.uuid5(
+            _uuid_module.NAMESPACE_URL,
+            f'aig-deal-version:{opportunity_id}:'
+            f'{change_source_interaction_id or "none"}:'
+            f'{extraction_disambiguator or ""}',
+        ))
+
         # Copy all Deal properties to the DealVersion, then override version-specific
         # fields. This pattern automatically captures new dim_* properties without
         # requiring Cypher changes when ontology dimensions are added.
         query = """
             MATCH (d:Deal {tenant_id: $tenant_id, opportunity_id: $opportunity_id})
-            CREATE (v:DealVersion)
-            SET v += d {.*}
-            SET v.version_id = randomUUID(),
+            MERGE (v:DealVersion {version_id: $version_id, tenant_id: $tenant_id})
+            ON CREATE SET
+                v += d {.*},
+                v.version_id = $version_id,
                 v.deal_opportunity_id = d.opportunity_id,
                 v.version = d.version,
                 v.change_summary = $change_summary,
@@ -370,6 +406,7 @@ class DealRepository:
             {
                 'tenant_id': str(tenant_id),
                 'opportunity_id': opportunity_id,
+                'version_id': version_id,
                 'change_summary': change_summary,
                 'changed_fields': changed_fields,
                 'change_source_interaction_id': (

@@ -9,6 +9,7 @@ Implements the full merge flow including MEDDIC field flattening,
 evolution narrative generation, and conditional embedding updates.
 """
 
+import hashlib
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
@@ -26,6 +27,21 @@ from ..utils import uuid7
 from .matcher import DealMatchResult
 
 logger = structlog.get_logger(__name__)
+
+
+def _deal_extraction_content_hash(extracted: ExtractedDeal) -> str:
+    """Stable content hash for two-extractions-to-same-deal disambiguation.
+
+    Hashes the full serialized ExtractedDeal so two extractions sharing
+    ``opportunity_name`` but differing on stage, MEDDIC fields, amount,
+    etc. produce distinct snapshot version_ids. Byte-identical
+    extractions collapse — and that's an upstream consolidation concern,
+    not a snapshot concern. Mirrors
+    ``action_item_graph.pipeline.merger._extraction_content_hash``
+    (Codex B-2 R3 absorption).
+    """
+    canonical = extracted.model_dump_json(round_trip=True)
+    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()[:16]
 
 
 # Map stage strings to DealStage enum
@@ -293,43 +309,34 @@ class DealMerger:
             },
         )
 
-    async def _merge_existing(
+    async def construct_merged_deal_llm(
         self,
-        match_result: DealMatchResult,
-        tenant_id: UUID,
-        source_interaction_id: UUID | None,
-    ) -> DealMergeResult:
+        *,
+        extracted_deal: ExtractedDeal,
+        existing_props: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Pure-LLM phase of deal merging (no Neo4j writes, no embedding call).
+
+        Calls the LLM with the MEDDIC merge prompt to produce a
+        ``MergedDeal`` and normalizes ``changed_fields`` against the
+        whitelist. Returns a JSON-safe dict so DBOS can checkpoint it
+        and ``persist_merged_deal_neo4j`` can consume it as a separate
+        step.
+
+        The conditional embedding call is intentionally NOT in this
+        step. Legacy ordering (Codex B-2 absorption) is
+        ``LLM-synthesis → snapshot → embedding → update`` — moving the
+        embedding into this LLM step would change failure-path write
+        semantics. Keep the embedding call inside the persist method
+        between snapshot and update.
+
+        D7 inner refactor: splitting LLM from Neo4j write at the
+        function level keeps the DBOS step boundary single (per-deal
+        failures are fail-open inside the match_merge_loop).
         """
-        Merge an extraction into an existing Deal.
-
-        Flow:
-        1. LLM synthesis — apply MEDDIC merge rules
-        2. Version snapshot — capture current state before changes
-        3. Update deal — write merged state + increment version
-        4. Optionally re-embed — if summary changed substantially
-
-        Args:
-            match_result: Match result with matched_deal set
-            tenant_id: Tenant UUID
-            source_interaction_id: Interaction that triggered this merge
-
-        Returns:
-            DealMergeResult for the merge
-        """
-        matched = match_result.matched_deal
-        existing_props = matched.node_properties
-        extracted = match_result.extracted_deal
-        opportunity_id = matched.opportunity_id
-
-        log = logger.bind(
-            opportunity_id=opportunity_id,
-            match_type=match_result.match_type,
-        )
-
-        # Step 1: LLM synthesis
         messages = build_deal_merge_prompt(
             existing_deal=existing_props,
-            extracted_deal=extracted,
+            extracted_deal=extracted_deal,
         )
 
         merged: MergedDeal = await self.openai.chat_completion_structured(
@@ -343,6 +350,37 @@ class DealMerger:
             if f in DEAL_PROPERTY_WHITELIST
         ]
 
+        return {
+            'merged': merged.model_dump(),
+        }
+
+    async def persist_merged_deal_neo4j(
+        self,
+        *,
+        llm_result: dict[str, Any],
+        existing_props: dict[str, Any],
+        opportunity_id: str,
+        tenant_id: UUID,
+        source_interaction_id: UUID | None,
+        extracted_deal: ExtractedDeal,
+    ) -> DealMergeResult:
+        """Mostly-Neo4j-write phase of deal merging.
+
+        Consumes the dict produced by :meth:`construct_merged_deal_llm`
+        and applies: version snapshot, then optionally an embedding
+        refresh (LLM call ordered BETWEEN snapshot and update for
+        legacy parity per Codex B-2 absorption), then update_deal.
+
+        ``extracted_deal`` is the upstream ExtractedDeal. Its
+        ``opportunity_name`` feeds the embedding text composition
+        (legacy: ``f'{extracted.opportunity_name}: {merged.opportunity_summary}'``)
+        and its full content hash feeds the snapshot disambiguator
+        (Codex B-2 R3 absorption).
+        """
+        merged = MergedDeal.model_validate(llm_result['merged'])
+
+        log = logger.bind(opportunity_id=opportunity_id)
+
         log.info(
             'deal_merger.synthesis_complete',
             changed_fields=merged.changed_fields,
@@ -350,22 +388,37 @@ class DealMerger:
             implied_stage=merged.implied_stage,
         )
 
-        # Step 2: Version snapshot (BEFORE applying updates)
+        # Step 2: Version snapshot (BEFORE applying updates).
+        # The repository uses a deterministic version_id derived from
+        # (opportunity_id, source_interaction_id, extraction_disambiguator)
+        # so this MERGE is idempotent under DBOS retry AND distinguishes
+        # two separate extracted deals that resolve to the same existing
+        # opportunity_id within one envelope (Codex B-2 R3 absorption).
+        # Hash the FULL ExtractedDeal so two extractions with identical
+        # opportunity_name but different stage/MEDDIC fields still
+        # produce distinct snapshots.
         await self.repository.create_version_snapshot(
             tenant_id=tenant_id,
             opportunity_id=opportunity_id,
             change_summary=merged.change_narrative,
             changed_fields=merged.changed_fields,
             change_source_interaction_id=source_interaction_id,
+            extraction_disambiguator=_deal_extraction_content_hash(extracted_deal),
         )
 
         # Step 3: Build updates dict from merged output
         updates = self._build_updates_dict(merged, existing_props)
 
-        # Step 4: Conditionally update embedding_current
+        # Step 4: Embedding refresh between snapshot and update —
+        # legacy ordering per Codex B-2 absorption. The embedding call
+        # is the only LLM operation in this otherwise pure-Neo4j-write
+        # phase; placing it here matches the legacy
+        # ``snapshot → embedding → update`` order.
         embedding_updated = False
         if merged.should_update_embedding:
-            embedding_text = f'{extracted.opportunity_name}: {merged.opportunity_summary}'
+            embedding_text = (
+                f'{extracted_deal.opportunity_name}: {merged.opportunity_summary}'
+            )
             new_embedding = await self.openai.create_embedding(embedding_text)
             updates['embedding_current'] = new_embedding
             embedding_updated = True
@@ -399,6 +452,42 @@ class DealMerger:
                 'evolution_summary': merged.evolution_summary,
                 'deal_properties': updated,
             },
+        )
+
+    async def _merge_existing(
+        self,
+        match_result: DealMatchResult,
+        tenant_id: UUID,
+        source_interaction_id: UUID | None,
+    ) -> DealMergeResult:
+        """
+        Merge an extraction into an existing Deal.
+
+        Implemented as a sequential call to
+        :meth:`construct_merged_deal_llm` followed by
+        :meth:`persist_merged_deal_neo4j`. The legacy ``/process`` HTTP
+        route enters here; the DBOS workflow path's D7 step also calls
+        this method (single DBOS step boundary preserved because
+        per-deal failures are fail-open inside match_merge_loop), but
+        the inner function refactor surfaces the split for clarity and
+        for any future move to per-deal step granularity.
+        """
+        matched = match_result.matched_deal
+        if matched is None:  # defensive — _merge_existing is only called when matched is set
+            raise RuntimeError(
+                'deal_merger._merge_existing called with matched_deal=None'
+            )
+        llm_result = await self.construct_merged_deal_llm(
+            extracted_deal=match_result.extracted_deal,
+            existing_props=matched.node_properties,
+        )
+        return await self.persist_merged_deal_neo4j(
+            llm_result=llm_result,
+            existing_props=matched.node_properties,
+            opportunity_id=matched.opportunity_id,
+            tenant_id=tenant_id,
+            source_interaction_id=source_interaction_id,
+            extracted_deal=match_result.extracted_deal,
         )
 
     def _build_updates_dict(

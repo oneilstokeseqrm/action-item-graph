@@ -542,11 +542,21 @@ class TestDealVersionOperations:
             )
             await repo.create_deal(deal)
 
+            # Two distinct source interactions so the deterministic
+            # version_id (Phase B-2 codex absorption — DBOS retry safety)
+            # produces distinct DealVersion nodes. In production each
+            # envelope carries its own interaction_id, so this matches
+            # real call patterns.
+            import uuid as _uuid_module
+            source_v1 = _uuid_module.uuid4()
+            source_v2 = _uuid_module.uuid4()
+
             # Create version 1 snapshot, then update
             await repo.create_version_snapshot(
                 TENANT_ID, opp_id,
                 change_summary='Pain identified: data silos',
                 changed_fields=['meddic_identified_pain'],
+                change_source_interaction_id=source_v1,
             )
             await repo.update_deal(TENANT_ID, opp_id, {
                 'stage': 'qualification',
@@ -558,6 +568,7 @@ class TestDealVersionOperations:
                 TENANT_ID, opp_id,
                 change_summary='Champion identified: Sarah',
                 changed_fields=['meddic_champion', 'amount'],
+                change_source_interaction_id=source_v2,
             )
             await repo.update_deal(TENANT_ID, opp_id, {
                 'stage': 'proposal',
