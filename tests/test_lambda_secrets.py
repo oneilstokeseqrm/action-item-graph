@@ -1,16 +1,20 @@
 """Tests for the Lambda Secrets Manager fetch + cache logic.
 
 Tests the secrets.py module in isolation using mocked boto3 calls.
+Requires `uv sync --extra lambda` for boto3 + aws_lambda_powertools;
+without the extra, this module skips via ``pytest.importorskip``.
 """
-
-from unittest.mock import MagicMock, patch
 
 import pytest
 
-from action_item_graph.lambda_ingest.secrets import (
+pytest.importorskip("boto3")
+
+from unittest.mock import MagicMock, patch  # noqa: E402
+
+from action_item_graph.lambda_ingest.secrets import (  # noqa: E402
     clear_cache,
+    get_dbos_system_database_url,
     get_secret,
-    get_worker_api_key,
 )
 
 
@@ -29,34 +33,25 @@ class TestGetSecret:
     def test_fetches_secret_from_secrets_manager(self, mock_boto3):
         mock_client = MagicMock()
         mock_boto3.client.return_value = mock_client
-        mock_client.get_secret_value.return_value = {
-            "SecretString": "my-secret-value"
-        }
+        mock_client.get_secret_value.return_value = {"SecretString": "my-secret-value"}
 
         result = get_secret("/my-service/my-key")
 
         mock_boto3.client.assert_called_once_with("secretsmanager")
-        mock_client.get_secret_value.assert_called_once_with(
-            SecretId="/my-service/my-key"
-        )
+        mock_client.get_secret_value.assert_called_once_with(SecretId="/my-service/my-key")
         assert result == "my-secret-value"
 
     @patch("action_item_graph.lambda_ingest.secrets.boto3")
     def test_caches_secret_across_calls(self, mock_boto3):
         mock_client = MagicMock()
         mock_boto3.client.return_value = mock_client
-        mock_client.get_secret_value.return_value = {
-            "SecretString": "cached-value"
-        }
+        mock_client.get_secret_value.return_value = {"SecretString": "cached-value"}
 
-        # First call fetches from Secrets Manager
         result1 = get_secret("/my-service/cached-key")
-        # Second call should use cache — no additional API call
         result2 = get_secret("/my-service/cached-key")
 
         assert result1 == "cached-value"
         assert result2 == "cached-value"
-        # boto3.client called only once (first call)
         assert mock_boto3.client.call_count == 1
 
     @patch("action_item_graph.lambda_ingest.secrets.boto3")
@@ -103,42 +98,45 @@ class TestGetSecret:
         assert "Not authorized" in error_msg
 
 
-class TestGetWorkerApiKey:
-    """Tests for get_worker_api_key()."""
+class TestGetDbosSystemDatabaseUrl:
+    """Tests for get_dbos_system_database_url()."""
 
     @patch("action_item_graph.lambda_ingest.secrets.boto3")
     def test_reads_secret_name_from_env_and_fetches(self, mock_boto3, monkeypatch):
         monkeypatch.setenv(
-            "SECRET_NAME_WORKER_API_KEY", "/action-item-graph/worker-api-key"
+            "SECRET_NAME_DBOS_SYSTEM_DATABASE_URL",
+            "/action-item-graph/dbos-system-database-url",
         )
         mock_client = MagicMock()
         mock_boto3.client.return_value = mock_client
         mock_client.get_secret_value.return_value = {
-            "SecretString": "the-real-api-key"
+            "SecretString": "postgresql://user:pw@ep-test.us-east-1.aws.neon.tech/eq_aig_dbos_sys?sslmode=require"
         }
 
-        result = get_worker_api_key()
+        result = get_dbos_system_database_url()
 
-        assert result == "the-real-api-key"
+        assert result == (
+            "postgresql://user:pw@ep-test.us-east-1.aws.neon.tech/eq_aig_dbos_sys?sslmode=require"
+        )
         mock_client.get_secret_value.assert_called_once_with(
-            SecretId="/action-item-graph/worker-api-key"
+            SecretId="/action-item-graph/dbos-system-database-url"
         )
 
     def test_raises_if_env_var_not_set(self, monkeypatch):
-        monkeypatch.delenv("SECRET_NAME_WORKER_API_KEY", raising=False)
+        monkeypatch.delenv("SECRET_NAME_DBOS_SYSTEM_DATABASE_URL", raising=False)
 
-        with pytest.raises(RuntimeError, match="SECRET_NAME_WORKER_API_KEY"):
-            get_worker_api_key()
+        with pytest.raises(RuntimeError, match="SECRET_NAME_DBOS_SYSTEM_DATABASE_URL"):
+            get_dbos_system_database_url()
 
     def test_error_message_is_actionable(self, monkeypatch):
-        monkeypatch.delenv("SECRET_NAME_WORKER_API_KEY", raising=False)
+        monkeypatch.delenv("SECRET_NAME_DBOS_SYSTEM_DATABASE_URL", raising=False)
 
         with pytest.raises(RuntimeError) as exc_info:
-            get_worker_api_key()
+            get_dbos_system_database_url()
 
         error_msg = str(exc_info.value)
         assert "environment variable" in error_msg.lower()
-        assert "SECRET_NAME_WORKER_API_KEY" in error_msg
+        assert "SECRET_NAME_DBOS_SYSTEM_DATABASE_URL" in error_msg
 
 
 class TestClearCache:
@@ -148,23 +146,15 @@ class TestClearCache:
     def test_clear_cache_forces_refetch(self, mock_boto3):
         mock_client = MagicMock()
         mock_boto3.client.return_value = mock_client
-        mock_client.get_secret_value.return_value = {
-            "SecretString": "value-v1"
-        }
+        mock_client.get_secret_value.return_value = {"SecretString": "value-v1"}
 
-        # Fetch and cache
         get_secret("/my-service/rotating-key")
         assert mock_boto3.client.call_count == 1
 
-        # Clear cache
         clear_cache()
 
-        # Update the mock to return a new value
-        mock_client.get_secret_value.return_value = {
-            "SecretString": "value-v2"
-        }
+        mock_client.get_secret_value.return_value = {"SecretString": "value-v2"}
 
-        # Should fetch again (cache was cleared)
         result = get_secret("/my-service/rotating-key")
         assert result == "value-v2"
         assert mock_boto3.client.call_count == 2
