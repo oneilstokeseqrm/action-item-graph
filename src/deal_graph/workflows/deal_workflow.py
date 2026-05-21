@@ -60,7 +60,15 @@ async def deal_workflow(envelope_dict: dict[str, Any]) -> dict[str, Any]:
         )
 
     envelope_interaction_id = envelope_dict.get('interaction_id') or '?'
-    opportunity_id = envelope_dict.get('opportunity_id')
+    # opportunity_id lives in envelope.extras per EnvelopeV1's @property
+    # accessor (models/envelope.py:108-111). Legacy pipeline.py:256 reads
+    # via the property; the workflow path must source from the same place
+    # (extras), not the top-level dict. See Rule 8 in
+    # ~/.claude/projects/.../memory/pattern_dbos_workflow_parity_rules.md
+    # — Pydantic @property accessors don't survive model_dump(), so
+    # consumer code must either model_validate() first or replicate the
+    # property's dict-key path explicitly.
+    opportunity_id = (envelope_dict.get('extras') or {}).get('opportunity_id')
     logger.info(
         'deal_workflow.started',
         envelope_interaction_id=envelope_interaction_id,
