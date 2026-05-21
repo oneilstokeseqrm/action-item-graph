@@ -12,7 +12,7 @@ evolution narrative generation, and conditional embedding updates.
 import hashlib
 from dataclasses import dataclass
 from typing import Any
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 import structlog
 
@@ -23,7 +23,6 @@ from ..models.deal import Deal, DealStage, MEDDICProfile, OntologyScores
 from ..models.extraction import DimensionExtraction, ExtractedDeal, MergedDeal
 from ..prompts.merge_deals import build_deal_merge_prompt
 from ..repository import DealRepository
-from ..utils import uuid7
 from .matcher import DealMatchResult
 
 logger = structlog.get_logger(__name__)
@@ -239,7 +238,28 @@ class DealMerger:
         Returns:
             DealMergeResult for the creation
         """
-        opportunity_id = uuid7()
+        # Deterministic opportunity_id for retry-safe MERGE in
+        # ``repository.create_deal`` (already MERGE-keyed on
+        # ``(tenant_id, opportunity_id)``). D7
+        # (``match_merge_loop_step``) is ``retries_allowed=False``, but
+        # workflow crash-recovery still re-executes the step from scratch
+        # — the prior ``uuid7()`` generation would produce a NEW
+        # opportunity_id on every recovery and create a duplicate Deal
+        # node. UUID5 over ``(tenant_id, source_interaction_id,
+        # _deal_extraction_content_hash(extracted_deal))`` is stable
+        # across recoveries: two retries of the same extracted_deal
+        # produce the same opportunity_id; two distinct extracted_deals
+        # sharing opportunity_name but differing in MEDDIC/stage produce
+        # different opportunity_ids (the content hash is wide enough to
+        # disambiguate). Per
+        # ``memory/pattern_dbos_workflow_parity_rules.md`` Rule 6 —
+        # Phase F /review absorption mirroring the Phase B-2 fix to
+        # ``create_version_snapshot``.
+        opportunity_id = uuid5(
+            NAMESPACE_URL,
+            f'aig-deal:{tenant_id}:{source_interaction_id or "none"}:'
+            f'{_deal_extraction_content_hash(extracted_deal)}',
+        )
 
         # Map stage assessment to DealStage enum
         stage = STAGE_MAP.get(

@@ -12,6 +12,7 @@ Key design decisions:
   existing Interaction nodes without touching skeleton-owned properties.
 """
 
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
@@ -371,10 +372,8 @@ class DealRepository:
         # 1-merge-per-(opportunity,interaction) case.
         #
         # See ``memory/pattern_dbos_workflow_parity_rules.md`` Rule 6.
-        import uuid as _uuid_module
-
-        version_id = str(_uuid_module.uuid5(
-            _uuid_module.NAMESPACE_URL,
+        version_id = str(uuid.uuid5(
+            uuid.NAMESPACE_URL,
             f'aig-deal-version:{opportunity_id}:'
             f'{change_source_interaction_id or "none"}:'
             f'{extraction_disambiguator or ""}',
