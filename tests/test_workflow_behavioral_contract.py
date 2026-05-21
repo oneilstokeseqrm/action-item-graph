@@ -378,24 +378,17 @@ class TestWorkflowCanonicalCaseBBehavioralContract:
             f"when postgres client is None; got: {[c[0] for c in calls]}"
         )
 
-    async def test_workflow_executes_step_chain_through_topic_creation(self, workflow_run_async):
-        """The canonical envelope produces a new topic; the workflow MUST
-        reach the topic-creation phase (S10b). This pins that the workflow
-        doesn't short-circuit prematurely after S9b.
+    async def test_workflow_reaches_merge_persist_phase(self, workflow_run_async):
+        """The canonical envelope (1 action item, no candidates) MUST reach
+        S9b merging_persist. This pins that the workflow doesn't short-
+        circuit prematurely on an early-return path (no_items, all_filtered).
 
-        We check via TopicExecutor.execute_batch (mocked) — its presence
-        in the mock's call history confirms the workflow reached the
-        topic-resolution-persist step."""
-        # The fixture ran the workflow; check that execute_batch was called.
-        # Since execute_batch is patched at the class level (not on the spy),
-        # we check it via the patch's call_count using a separate mock check.
-        # Easiest: assert on the repository methods that ONLY topic creation
-        # would invoke — but TopicExecutor.execute_batch is mocked, so it
-        # doesn't actually call repository.create_topic.
-        # Instead, assert that the workflow reached the postgres_dual_write
-        # phase by checking that S9b's create_action_item ran (covered in
-        # the test above). The presence of create_action_item is the proof
-        # that the workflow chain executed end-to-end through S9b at least.
+        The S10b topic-creation phase is mocked at the TopicExecutor class
+        level (not via the spy repository), so we can't assert on S10b
+        directly here without exposing the patch handle through the fixture.
+        S9b reach is sufficient evidence the workflow chain executed end-
+        to-end past the merge step; an S9b → S10b skip would be a
+        per-step bug caught by tests/test_action_item_workflow.py."""
         repo = workflow_run_async
         assert any(c[0] == "create_action_item" for c in repo.method_calls), (
             "workflow MUST reach S9b create_action_item — confirms the "
