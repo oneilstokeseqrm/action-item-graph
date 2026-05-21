@@ -18,9 +18,22 @@ A 2026-05-19 Lambda timeout incident (Anthropic security questionnaire ~5,500 wo
 
 **Two planning sessions** (2026-05-20) produced an APPROVED design doc and APPROVED execution plan with 40 tasks.
 
-**Two implementation sessions** (2026-05-20 + 2026-05-21) shipped **Phase A (foundation)** as commit `1bfd42d`, **Phase B-1 (action-item workflow + steps)** as `6e51059`, **Phase B-2 (deal workflow + steps + repository idempotency fixes)** as `6e11307`. **10 rounds of `/codex review` absorbed** across these phases (9 HIGHs + 4 MEDIUMs resolved).
+**Four implementation sessions** (2026-05-20 → 2026-05-21) shipped Phases A + B-1 + B-2 + C + E. The branch `feat/dbos-migration` is **10 commits ahead of `main`** — 9 substantive migration commits (listed below) plus 1 handoff-prep docs commit at branch HEAD:
 
-**The next agent picks up at Phase C (T13-T17 Lambda dispatcher cutover, ~1.5 hrs).** Phases D/E/F still ahead (retire `/process`, tests, deploy + DLQ replay). See "Picking up from Phase B complete — Phase C resumption guide" below for the orientation sequence.
+- ``1bfd42d`` Phase A — runtime substrate + Neon state DB
+- ``6e51059`` Phase B-1 — action-item workflow + steps scaffolding (T10)
+- ``6e11307`` Phase B-2 — deal workflow + steps + repository idempotency (T11+T12)
+- ``3ca3b1e`` Phase C — Lambda dispatcher cutover (T13-T17)
+- ``00c849e`` fix — deal_workflow reads opportunity_id from extras (parity with legacy, surfaced by Phase E T23)
+- ``8711106`` Phase E1 — workflow + Lambda test coverage (T21+T22+T23)
+- ``5b136a6`` Phase E2 — workflow behavioral contract tests (T25a, scoped down)
+- ``c042207`` Phase E3 — compatibility + concurrent-write tests (T32-T34)
+- ``75ca5f2`` fix — rename Phase E2 contract test to match its actual assertion (codex absorption)
+- (next commit, branch HEAD) docs — Phase F handoff prep: HANDOFF.md Phase F resumption guide + Phase A+B+C+E execution log + pre-PR brief skeleton
+
+**12 rounds of `/codex review` absorbed** cumulatively across Phases A→E (3 in A, 3 in B-1, 4 in B-2, 1 in C, 1 in E). **649 tests passing** (554 baseline + 95 new in Phase E).
+
+**The next agent picks up at Phase F: full-PR `/review` + full-PR `/codex review` (3-5 rounds expected) + structured pre-PR brief synthesis + `/ship`.** Phase D (retire `/process`) intentionally deferred to a separate PR Day 14+ post-deploy. See "Picking up from Phase E complete — Phase F /review + /codex + /ship guide" below for the orientation sequence.
 
 ---
 
@@ -210,9 +223,113 @@ The 2-week rollback window starts when Phase 2 deploys (T29). Phase 3 (T31 — d
 
 ---
 
-## Picking up from Phase B complete — Phase C resumption guide
+## Picking up from Phase E complete — Phase F /review + /codex + /ship guide
 
-**This is the CURRENT entry point for the next agent.** Phase A + B-1 + B-2 are shipped as `feat/dbos-migration` commits (1bfd42d → 6e51059 → 6e11307). Phase C (Lambda dispatcher cutover, T13–T17) is the next concrete work.
+**This is the CURRENT entry point for the next agent.** Phases A + B-1 + B-2 + C + E are shipped on `feat/dbos-migration` (10 commits ahead of `main` (9 substantive migration + 1 handoff-prep docs); see TL;DR for the full commit log). Phase E /codex review (Phase-E-only scope) returned an explicit "No high-severity ship blockers" verdict, with one non-blocking observation absorbed via a test rename (commit `75ca5f2`).
+
+Phase F is the **full-PR review + ship sequence**: run `/review` skill, then `/codex review` on the full 9-commit branch (3-5 rounds expected — see iteration ceiling below), then synthesize a structured pre-PR brief, then surface to Peter at the `/ship` gate. **Phase D (retire `/process`)** is intentionally deferred to a separate PR Day 14+ post-Phase 2 deploy per the locked 3-phase migration; do NOT bundle it into this PR.
+
+### Step 1 — Orient (15 min, mandatory reading)
+
+In this exact order:
+
+1. **This doc, top-to-bottom.** Especially: TL;DR (current state), "Phase A + B + C + E execution log" (what shipped, in what shape, codex round outcomes), "Locked decisions (consolidated)" (D1–D5 + Open #3 settled state + State DB + Cutover + Workflow ID format), "Known limitations" (deferred follow-ups), "T25a scope decision (2026-05-21, Phase E2)" — the load-bearing context for why T25a is 5 contract tests instead of a side-by-side parity test.
+2. **`docs/plans/2026-05-20-dbos-migration-execution-plan.md`** — the original 40-task plan. Cross-check Phase E completion against the T-numbered task list; T24, T25b, T26, T35 are intentionally NOT done (P2 items, documented in Phase E3 commit and the pre-PR brief skeleton).
+3. **The pre-PR brief skeleton** at `docs/plans/2026-05-21-PHASE-F-PRE-PR-BRIEF.md` — pre-populated with the 9-commit log, deletion-seam list, known-deferred-items list, test count delta, and empty findings-categorization sections ready to fill during `/review` + `/codex review`. This is the artifact you fold findings into; don't reconstruct it.
+4. **Memory index** at `~/.claude/projects/-Users-peteroneil-EQ-CORE-action-item-graph/memory/MEMORY.md`. Mandatory entries for Phase F:
+   - `feedback_autonomous_execution.md` — Peter's execution preference (surface only at natural breaks)
+   - `feedback_plan_literal_wording.md` — when the plan already settled a question, don't re-surface
+   - `feedback_secret_handoff_pattern.md` — hostname + endpoint ID + role only when surfacing credentials, NEVER passwords
+   - `feedback_test_seam_signals.md` — Phase E-earned pattern: two mock strategies fighting different layers = codebase signaling natural test seams; pivot rather than push through with attempt #3
+   - `pattern_dbos_workflow_parity_rules.md` — **8 rules** earned across Phase A→E codex reviews (12 rounds total). Rule 7 (cross-service reference call shape) and Rule 8 (Pydantic @property reads through model_dump) are the two newest.
+   - `reference_neon_dbos_state_dbs.md` — where DBOS state DBs live + direct-connection requirement (relevant at T29 deploy time, not for the review pass)
+   - `project_dbos_migration_trajectory.md` — full project state through Phase E
+5. **The full 9-commit log** via `git log --stat 1bfd42d..HEAD` — gives the complete picture of what shipped.
+
+### Step 2 — Surface understanding before touching code
+
+Before invoking `/review`, confirm with Peter:
+- That you've read the four mandatory pre-reads (this doc, the plan, the pre-PR brief skeleton, the memory index)
+- Your understanding of Phase E's scope-down decisions (T25a behavioral contracts instead of side-by-side parity; rationale in the T25a scope decision section)
+- The HIGH-severity surface trigger condition you'll apply during reviews
+- Wait for greenlight before invoking `/review`.
+
+### Step 3 — Phase F scope (Phase F = /review + /codex + brief + /ship)
+
+**Sequence:**
+
+1. **`/review` skill** — runs the gstack pre-landing review on the full branch diff (3ca3b1e..HEAD includes Phase C + Phase E commits; for the full branch use 1bfd42d..HEAD or `--base main`). Single analytical pass. Absorb its findings into the pre-PR brief skeleton's "Findings absorbed" sections under HIGH / MEDIUM / NIT categories.
+
+2. **`/codex review` full-PR** — codex CLI invocation with the full branch diff. Use the same constrained-scope pattern that worked for Phase C + Phase E (medium reasoning, no file exploration, diff-only prompt). Expected 3-5 rounds. Each round:
+   - Surface HIGH findings to Peter BEFORE absorption (architectural concerns, security issues, correctness bugs affecting production behavior).
+   - Absorb MEDIUM / NIT findings autonomously, recording each in the pre-PR brief.
+   - Re-run codex after each absorption (the absorption may have introduced new code requiring review).
+   - **Stop signal**: codex's explicit "no ship-blocking findings" verdict.
+
+3. **Pre-PR brief synthesis** — fold all findings into the pre-populated skeleton at `docs/plans/2026-05-21-PHASE-F-PRE-PR-BRIEF.md`. Categorize findings: HIGH absorbed (with reasoning), MEDIUM absorbed (with reasoning), NIT addressed (with reasoning), deliberate non-action (with reasoning).
+
+4. **Surface to Peter at the `/ship` gate** — present the structured brief. Do NOT invoke `/ship` until Peter explicitly greenlights.
+
+### Step 4 — Peter's three conditions (apply during Step 3) — VERBATIM
+
+1. **HIGH-severity findings get surfaced BEFORE absorption.** Full-PR `/review` and `/codex review` will see all of Phases A+B-1+B-2+C+E together — a bigger blast radius than the Phase E-only review just ran. Cross-phase architectural concerns may surface that the scoped reviews couldn't see. If either skill surfaces a HIGH finding (architectural concern, security issue, correctness bug affecting production behavior), stop and surface back to Peter before deciding how to absorb. P2/P3 findings absorb autonomously per the discipline applied across this session.
+
+2. **Apply the codex iteration ceiling.** 3-5 rounds default, stop on explicit "no ship-blocking" verdict. The Phase B-2 precedent (4 rounds, HIGH findings sustained) is the upper bound. If round 6 is being contemplated and findings have moved to P3/edge-case territory, that's the stop signal.
+
+3. **Surface at `/ship` with a structured pre-PR brief**: full 9-commit log with one-line summaries each; findings absorbed across `/review` + all `/codex` rounds (categorized HIGH absorbed / MEDIUM absorbed / NIT addressed / deliberate non-action with reasoning); draft PR title (<70 chars); draft PR body with Summary + Test plan + What-this-enables sections; test count delta (was 554, now 649 — confirm holds at `/ship` time); deletion-seam list for the Phase D follow-up PR.
+
+### Step 5 — Peter's four watchpoints (apply during Step 3) — VERBATIM
+
+These are the specific things Peter will be reading the structured pre-PR brief for. Make sure each is observably present:
+
+1. **Cross-phase architectural cohesion.** Does Phase A's DBOS runtime + Phase B's step decomposition + Phase C's Lambda dispatcher + Phase E's tests hang together as one coherent migration, or are there phase-boundary seams that would confuse a future reader?
+
+2. **Documentation completeness.** Does HANDOFF.md describe the full migration arc such that someone reading it cold can understand what shipped and why?
+
+3. **Test coverage at phase boundaries.** Phase B-1 → B-2, Phase C → E1 — are the integration points tested, or only the individual phase contents?
+
+4. **The known-deferred-items list.** T24, T25b, T26, T35 — make sure the PR body explicitly acknowledges what's NOT in this PR and why, so the reviewer knows the scope.
+
+### Step 6 — Apply the earned patterns preemptively
+
+The 8 rules in `pattern_dbos_workflow_parity_rules.md` are LOAD-BEARING for `/codex review` absorption. If codex flags a finding that maps to one of the rules, the absorption should cite the rule. Specifically:
+
+- **Rule 1** (validation in workflow body, not @DBOS.step): if codex flags a retry-wrap concern, the absorption may need to move validation logic.
+- **Rule 5** (downstream-produced identifier authority): if codex flags ID re-derivation, switch source to the authoritative step output.
+- **Rule 6** (repository-method idempotency audit): if codex flags a CREATE-with-randomUUID in any new code, convert to MERGE on deterministic key.
+- **Rule 7** (cross-service reference call shape must match deployment topology): if codex flags a misapplied pattern from LTF or another sibling service, verify the topology.
+- **Rule 8** (Pydantic @property reads through model_dump): if codex flags a top-level dict read where the model has @property indirection, replicate the dict-key path.
+
+### Step 7 — Surface at natural breaks (NOT every step)
+
+Per `feedback_autonomous_execution.md`:
+
+- **Mid-`/review`** only if `/review` surfaces an architectural concern that can't be absorbed without Peter's input.
+- **After each codex round** if a HIGH finding surfaces. Otherwise absorb autonomously and re-run.
+- **Pre-`/ship`** — mandatory. Present the structured brief.
+- Otherwise: execute autonomously.
+
+### Step 8 — Hard constraints (DO NOT VIOLATE)
+
+- **DO NOT** touch `live-transcription-fastapi` (separate repo, separate agents).
+- **DO NOT** touch the EQ test tenant data (tenant_id `11111111-1111-4111-8111-111111111111`).
+- **DO NOT** delete or redrive the DLQ message (MessageId `58863f20-3cda-48f7-973d-3002aa31331b`) until T30 (post-deploy live integration test).
+- **DO NOT** change external contracts (Neo4j node shapes, Postgres write contracts, EventBridge emissions) byte-for-byte.
+- **DO NOT** introduce new vendors or new durable-execution engines.
+- **DO NOT** re-litigate locked decisions (D1–D5, Open #3 V1 stance, workflow ID format, concurrency=1, T25a scope-down).
+- **DO NOT** echo password literals in conversation. The DBOS state DB URL is in Peter's vault; he'll provide at T29 deploy time.
+- **DO NOT** bundle Phase D (retire `/process`) into this PR.
+- **DO NOT** invoke `/ship` without Peter's explicit greenlight at the structured-brief gate.
+
+---
+
+## Picking up from Phase B complete — Phase C resumption guide (HISTORICAL)
+
+**(Historical — Phase C entry point, kept for trajectory record. The current
+entry point is Phase F; see "Picking up from Phase E complete — Phase F
+/review + /codex + /ship guide" above.)**
+
+Phase A + B-1 + B-2 are shipped as `feat/dbos-migration` commits (1bfd42d → 6e51059 → 6e11307). Phase C (Lambda dispatcher cutover, T13–T17) is the next concrete work.
 
 ### Step 1 — Orient (10 min, mandatory reading)
 
@@ -287,7 +404,7 @@ Per Peter's `feedback_autonomous_execution.md`:
 
 ---
 
-## Phase A + B execution log (for trajectory context)
+## Phase A + B + C + E execution log (for trajectory context)
 
 ### Phase A — Foundation (committed as `1bfd42d`, 2026-05-20 evening)
 
@@ -341,6 +458,77 @@ Per Peter's `feedback_autonomous_execution.md`:
 - **Untracked artifacts (not Phase A/B work):** `Claude-Context-Limits.txt`, `docs/plans/2026-02-22-event-consumer-implementation.md`, modified `TODOS.md`. Leave alone.
 - **The single DLQ message** (MessageId `58863f20-3cda-48f7-973d-3002aa31331b`) is still in `action-item-graph-dlq`. Untouched per hard constraint — to be redriven at T30 only.
 - **Direct connection URL for `eq_aig_dbos_sys`** is in Peter's vault (handed off in the original Phase A session; not echoed in any file).
+
+### Phase C — Lambda dispatcher cutover (committed as `3ca3b1e`, 2026-05-21 afternoon)
+
+**Tasks:** T13 (handler) + T14 (config) + T15 (secrets) + T16 (delete api_client.py) + T17 (Pulumi) + `scripts/package_lambda.sh` (pulled into Phase C scope by Peter; was originally listed as pre-deploy at T29).
+
+**Files touched:**
+- `src/action_item_graph/lambda_ingest/handler.py` — rewritten as DBOSClient.enqueue dispatcher. Module-level singletons (`_config`, `_dbos_client`, `_cloudwatch_client`) for warm-Lambda reuse. Workflow ID format per lock: `f"action-item-graph:{pipeline}:interaction-{uuid}"`. `workflow_timeout=900s`. Fail-fast on missing `envelope.interaction_id` (Rule 1). LTF graceful-degradation pattern for boto3 CloudWatch client (mirrors `eventbridge_emit.py:158-189`). On first-succeeds-second-fails: emits `partial_enqueue_pair_count` metric to CloudWatch BEFORE re-raising for SQS redelivery.
+- `src/action_item_graph/lambda_ingest/config.py` — Pydantic BaseSettings swap: removed `API_BASE_URL` + `WORKER_API_KEY` + `HTTP_TIMEOUT_SECONDS` + `MAX_RETRIES`, added `DBOS_SYSTEM_DATABASE_URL`. Cold-start fail-fast on missing env.
+- `src/action_item_graph/lambda_ingest/secrets.py` — `get_worker_api_key()` → `get_dbos_system_database_url()`. Reads from `SECRET_NAME_DBOS_SYSTEM_DATABASE_URL` env var.
+- `src/action_item_graph/lambda_ingest/api_client.py` — DELETED. HTTP forwarder retired in Phase C; Phase D removes the /process route Day 14+ post-deploy.
+- `infra/__main__.py` — Pulumi: dropped `worker-api-key` entry from `secrets={}` dict (back-compat alias gracefully degrades to no-op via `outputs.secret_arns_by_name.get(...)`). Dropped HTTP env vars from `lambda_env_vars`. Pulumi.prod.yaml entry kept for back-compat.
+- `scripts/package_lambda.sh` — added `dbos>=2.22.0,<3.0` + `psycopg[binary]>=3.2.0`. Removed `httpx`. Phase A T3 Docker verification confirmed final zip ~30 MB (well under 50 MB direct-upload threshold).
+
+**Architectural lock confirmations from `dbos==2.22.0` source inspection (per Rule 7):**
+- `DBOSClient.enqueue(options: EnqueueOptions, *args, **kwargs)` — matches design doc signature. `EnqueueOptions` is a TypedDict with `workflow_id` and `workflow_timeout` fields — no `SetWorkflowID` context manager needed (that's the in-process pattern LTF uses; AIG's Lambda is external).
+- `DBOSDuplicateWorkflowError` doesn't exist by that name. Real classes: `DBOSConflictingWorkflowError` (raised only on name/class/config mismatch) and `DBOSWorkflowConflictIDError` (lower-level insertion-time conflict). For same-id same-name re-enqueue, DBOS silently dedupes via `recovery_attempts++` — NO exception. The "catch and treat as success" framing in earlier docs was defensive belt-and-suspenders, not load-bearing.
+
+**Codex rounds:** 1. R1 explicit "No ship-blocking findings" — single-round stop signal (Phase C surface is ~150 LOC). Cross-verified `client.enqueue` call shape against DBOS docs via web search.
+
+**Tests:** 554 passing (test_lambda_handler.py + test_lambda_secrets.py + test_lambda_api_client.py still broken at collection; added to "Known-deferred test failures" list with Phase C note).
+
+### Phase E — Test coverage + bug fix (committed as `00c849e` + `8711106` + `5b136a6` + `c042207` + `75ca5f2`, 2026-05-21 evening)
+
+**Tasks:** T21 (Lambda test rewrite) + T22 (action-item workflow tests) + T23 (deal workflow tests) + T25a (regression — scoped down) + T32/T33/T34 (compatibility + concurrent-write).
+
+**Five atomic commits:**
+
+#### `00c849e` — fix(dbos): deal_workflow reads opportunity_id from extras (parity with legacy)
+
+Phase E T23 test writing surfaced a Phase B-2 regression. Legacy `pipeline.py:256` reads `envelope.opportunity_id` via the `EnvelopeV1.opportunity_id` @property (`extras.get('opportunity_id')`). Phase B-2's `deal_workflow.py:63` was reading top-level `envelope_dict.get('opportunity_id')` — but `model_dump(mode='json')` puts the value inside `extras`. Production impact: Case A targeted-deal flows would have silently fallen through to discovery mode.
+
+Fix: 1-line change to `(envelope_dict.get('extras') or {}).get('opportunity_id')`. Action-item workflow audited; no parallel bug (only reads top-level fields: account_id, tenant_id, interaction_id). Codified as **Rule 8** in `pattern_dbos_workflow_parity_rules.md`.
+
+#### `8711106` — Phase E1: workflow + Lambda test coverage (T21+T22+T23, 83 tests)
+
+- **T21 (24 tests):** rewrote 3 previously-broken-at-collection Lambda test files (`test_lambda_handler.py`, `test_lambda_secrets.py`, deleted `test_lambda_api_client.py`). Added `[lambda]` optional-dependencies extras group to pyproject.toml so `uv sync --extra lambda && pytest` enables full Lambda dispatcher coverage locally.
+- **Foundation (23 tests):** `test_workflows_runtime.py` (5) + `test_workflows_serialization.py` (18) — Rule 3 round-trip identity pinned for ExtractionOutput, MatchResult (tuples flatten), MatchCandidate, MergeResult, TopicResolutionResult, TopicCandidate, TopicExecutionResult.
+- **T22 (18 tests):** `test_action_item_workflow.py` — workflow body uses `__wrapped__.__wrapped__` to bypass DBOS's "Function invoked before DBOS initialized" guard. Tests: Rule 1 validation gate, Rule 5 authoritative interaction_id, early-return paths (no_items, all_filtered), enable_topics toggle, agent_outbox interaction_dict (Rule 5), per-step contracts for verification fail-open, S7 conditional + fail-open, S9b length mismatch (Rule 4), S10a context envelope source (Rule 2), S13 + S14 fail-open.
+- **T23 (18 tests):** `test_deal_workflow.py` — mirror structure for deal workflow. Tests: D1 validation in body (Rule 1), opportunity_id warning surfaces (THIS TEST CAUGHT THE BUG fixed in 00c849e), no_deals path enrichment, happy path, D8 Rule 5, per-step contracts for D3/D4/D7/D8/D9. **The bug-surfacing test is the empirical proof that per-step observable-behavior testing catches the cutover divergence class of bug** — load-bearing rationale for the T25a scope-down.
+
+**Key discoveries:**
+- `@DBOS.workflow` decorator IS NOT transparent for direct invocation (raises "Function invoked before DBOS initialized" at `_core.py:1107`). `__wrapped__.__wrapped__` bypasses both decorator layers and exposes the raw function.
+- `@DBOS.step` decorator IS transparent — direct invocation works as long as async mocks are used (`MagicMock` can't be `await`ed; need `AsyncMock`).
+- `patch.multiple(..., kw=AsyncMock()) as mocks` returns an EMPTY dict (counter-intuitive). Tests use a shared `step_mocks` fixture that creates mocks externally + yields the dict for test assertions.
+
+#### `5b136a6` — Phase E2: workflow behavioral contract tests (T25a, scoped down, 5 tests)
+
+T25a was originally scoped as bit-for-bit side-by-side comparison. After two mock-strategy attempts hit different layers of `process_envelope`'s internal complexity (Cypher-template comparison required enumerating dozens of RETURN-clause shapes; repository-class-level comparison hit unmocked async surfaces deeper in `_execute_merges`), the scope was tightened to 5 behavioral contracts on the workflow path.
+
+See "T25a scope decision (2026-05-21, Phase E2)" section below for the full rationale. Tests assert: workflow MUST call ensure_account exactly once (S1), create_interaction exactly once (S6), create_action_item exactly once for new match (S9b), NOT invoke postgres-bound methods when postgres=None, reach merge_persist phase. Codified pattern at `feedback_test_seam_signals.md`: "two mock strategies fighting different layers = codebase signaling natural test seams; pivot scope rather than push through with attempt #3."
+
+#### `c042207` — Phase E3: compatibility + concurrent-write tests (T32+T33+T34, 7 tests)
+
+- **T32 (3 tests):** `test_compatibility_process_route.py` — /process route returns 200 for valid envelope, 422 for invalid (Pydantic semantics), 500 for pipeline failure (5xx triggers SQS retry vs 4xx persistent failure). Phase 1 rollback safety net.
+- **T33 (2 tests):** new `TestT33DBOSUnreachable` class in `test_lambda_handler.py` — DBOSClient.enqueue raising connection error → BatchItemFailure; generic RuntimeError → BatchItemFailure. Simulates the Phase 2 deploy-order mistake (Lambda has new code, Railway/Neon DBOS state DB not reachable).
+- **T34 (2 tests):** `test_concurrent_pipelines.py` — both workflow bodies complete concurrently via `asyncio.gather`; shared client registry is concurrency-safe. Documented as a smoke test, NOT commutativity proof (the deeper commutativity guarantee is verified post-deploy via DLQ message redrive).
+
+#### `75ca5f2` — fix: rename Phase E2 contract test to match its actual assertion
+
+Phase E /codex review surfaced one non-blocking observation: `test_workflow_executes_step_chain_through_topic_creation` docstring claimed S10b topic-creation but the assertion was actually S9b `create_action_item`. Renamed to `test_workflow_reaches_merge_persist_phase` with docstring matching the actual assertion. Codex absorption.
+
+**Codex rounds (Phase E only — full-PR codex is Phase F):** 1. R1 explicit "No high-severity ship blockers found in 3ca3b1e..HEAD." Two non-blocking observations: (a) T25a test rename (absorbed via 75ca5f2), (b) T34 as smoke test not commutativity proof (already documented in test docstring).
+
+### Cumulative state at end of Phase E
+
+- **Tests:** 649 passing (554 baseline + 95 new in Phase E). All Phase E tests use `pytest.importorskip` where Lambda extras are needed, so default `uv sync && pytest` still works (the Lambda tests skip if extras not installed); `uv sync --extra lambda && pytest` runs the full suite.
+- **Pyright CLI:** clean except pre-existing missing-import warnings (boto3 + aws_lambda_powertools — only bundled into the Lambda zip via package_lambda.sh, not in the runtime pyproject.toml).
+- **Branch:** `feat/dbos-migration`, 10 commits ahead of `main` (9 substantive migration + 1 handoff-prep docs).
+- **Pre-existing artifacts in working tree (NOT Phase work, leave alone):** modified `TODOS.md`, untracked `Claude-Context-Limits.txt`, untracked `docs/plans/2026-02-22-event-consumer-implementation.md`.
+- **DLQ message** still parked. Same status as Phase B.
+- **Pattern memory updated:** 8 rules in `pattern_dbos_workflow_parity_rules.md` (Rule 7 from Phase C, Rule 8 from Phase E). New feedback memory `feedback_test_seam_signals.md` codifies the Phase E T25a-scope-down lesson.
 
 ---
 
