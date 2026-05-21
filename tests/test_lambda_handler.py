@@ -262,3 +262,59 @@ class TestCloudWatchDegradation:
 
         assert len(result["batchItemFailures"]) == 1
         flaky_cw.put_metric_data.assert_called_once()
+
+
+class TestT33DBOSUnreachable:
+    """T33 compatibility scenario: new Lambda deployed BEFORE Railway has
+    DBOS workers ready (incorrect deploy order). The Lambda's
+    DBOSClient.enqueue MUST surface a clear error → SQS retry → DLQ,
+    NOT silently drop the message.
+
+    Plan reference: tests/test_lambda_handler.py owns the dispatcher-side
+    coverage; the Railway-side /process removal is exercised by Phase D's
+    own deploy gate (route doesn't exist → 404 → Lambda fails fast).
+
+    **Deletion seam**: deleted alongside Phase D /process retirement.
+    """
+
+    def test_dbos_system_db_connection_error_surfaces_as_batch_failure(self, mock_dbos_client, mock_cloudwatch_client):
+        """Simulates the Phase 2 deploy-order mistake: Lambda has the new
+        DBOSClient code but Railway/Neon DBOS state DB isn't reachable.
+
+        Expected behavior: DBOSClient.enqueue raises a connection-like
+        exception → Lambda re-raises → SQS BatchItemFailure → SQS retries
+        per redrive policy → eventually DLQ.
+
+        Critical: the message MUST NOT be silently acked. SQS's
+        BatchItemFailure mechanism is the safety net."""
+        # Simulate the Neon connection error shape DBOSClient would propagate
+        # when its system DB isn't reachable. Using ConnectionError for
+        # type-clean test code (the production class is sqlalchemy
+        # OperationalError; the dispatcher's broad except surfaces both
+        # identically as BatchItemFailure).
+        mock_dbos_client.enqueue.side_effect = ConnectionError(
+            "connection to server failed: Connection refused"
+        )
+
+        event = _sqs_event([_eb_body()])
+        result = lambda_handler(event, _lambda_context())
+
+        # Lambda must surface as BatchItemFailure so SQS retries
+        assert len(result["batchItemFailures"]) == 1
+        # First enqueue was attempted; no partial-pair metric (nothing succeeded)
+        assert mock_dbos_client.enqueue.call_count == 1
+        mock_cloudwatch_client.put_metric_data.assert_not_called()
+
+    def test_dbos_generic_runtime_error_surfaces_as_batch_failure(self, mock_dbos_client, mock_cloudwatch_client):
+        """Belt-and-suspenders: any unexpected DBOS-side exception (not
+        just OperationalError) surfaces as BatchItemFailure. The dispatcher
+        doesn't swallow exceptions from DBOSClient.enqueue."""
+        mock_dbos_client.enqueue.side_effect = RuntimeError(
+            "DBOS workers not registered for queue 'action-item-pipeline'"
+        )
+
+        event = _sqs_event([_eb_body()])
+        result = lambda_handler(event, _lambda_context())
+
+        assert len(result["batchItemFailures"]) == 1
+        assert mock_dbos_client.enqueue.call_count == 1
