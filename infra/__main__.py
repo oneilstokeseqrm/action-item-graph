@@ -14,9 +14,6 @@ from forwarder import create_forwarder_stack
 # ── Stack Configuration ──
 config = pulumi.Config()
 
-worker_api_key = config.require_secret("worker-api-key")
-api_base_url = config.require("api-base-url")
-
 # DBOS system database connection (direct, non-pooler) for DBOSClient.enqueue
 # from the Lambda. Must be set before `pulumi up`:
 #   pulumi config set --secret dbos-system-database-url \
@@ -24,6 +21,13 @@ api_base_url = config.require("api-base-url")
 # The hostname MUST NOT contain "-pooler"; Neon's pooler breaks DBOS advisory
 # locks. See docs/plans/2026-05-20-dbos-migration-execution-plan.md (T4/T5).
 dbos_system_database_url = config.require_secret("dbos-system-database-url")
+
+# Phase C cutover (2026-05-21): the Lambda dispatcher no longer POSTs to
+# Railway /process; it enqueues directly via DBOSClient. The `worker-api-key`
+# and `api-base-url` Pulumi config entries are kept on the stack for
+# back-compat (Phase D removes them in a follow-up PR once the deprecated
+# `secret_arn` export alias is retired). The forwarder stack no longer
+# references them — see lambda_env_vars + secrets dicts below.
 
 # ── Create the Forwarder Stack ──
 outputs = create_forwarder_stack(
@@ -41,14 +45,10 @@ outputs = create_forwarder_stack(
     lambda_handler="action_item_graph.lambda_ingest.handler.lambda_handler",
     lambda_zip_path="../dist/action-item-graph-ingest.zip",
     lambda_env_vars={
-        "API_BASE_URL": api_base_url,
         "LOG_LEVEL": "INFO",
-        "HTTP_TIMEOUT_SECONDS": "100",
-        "MAX_RETRIES": "2",
         "POWERTOOLS_SERVICE_NAME": "action-item-graph-ingest",
     },
     secrets={
-        "worker-api-key": worker_api_key,
         "dbos-system-database-url": dbos_system_database_url,
     },
     rule_description="Routes transcript and email events to action-item-graph SQS queue",

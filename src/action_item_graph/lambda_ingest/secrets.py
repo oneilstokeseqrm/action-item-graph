@@ -41,21 +41,25 @@ def get_secret(secret_name: str) -> str:
     return value
 
 
-def get_worker_api_key() -> str:
-    """Get the WORKER_API_KEY from Secrets Manager.
+def get_dbos_system_database_url() -> str:
+    """Get the DBOS_SYSTEM_DATABASE_URL from Secrets Manager.
 
-    Reads the secret name from the SECRET_NAME_WORKER_API_KEY environment
-    variable (set by the Pulumi forwarder stack).
+    Reads the secret name from the SECRET_NAME_DBOS_SYSTEM_DATABASE_URL
+    environment variable (set by the Pulumi forwarder stack).
+
+    The stored value MUST be the direct (non-pooler) Neon connection URL —
+    Neon's pgbouncer endpoint drops the advisory locks DBOS relies on for
+    workflow coordination. See ``memory/reference_neon_dbos_state_dbs.md``.
 
     Raises:
         RuntimeError: If the env var is missing or the secret fetch fails.
     """
-    secret_name = os.environ.get("SECRET_NAME_WORKER_API_KEY")
+    secret_name = os.environ.get("SECRET_NAME_DBOS_SYSTEM_DATABASE_URL")
     if not secret_name:
         raise RuntimeError(
-            "SECRET_NAME_WORKER_API_KEY environment variable is not set. "
+            "SECRET_NAME_DBOS_SYSTEM_DATABASE_URL environment variable is not set. "
             "The Lambda must be deployed with this env var pointing to the "
-            "Secrets Manager secret name (e.g., /action-item-graph/worker-api-key)."
+            "Secrets Manager secret name (e.g., /action-item-graph/dbos-system-database-url)."
         )
     return get_secret(secret_name)
 

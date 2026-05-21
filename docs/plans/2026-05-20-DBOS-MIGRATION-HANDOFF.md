@@ -16,7 +16,11 @@
 
 A 2026-05-19 Lambda timeout incident (Anthropic security questionnaire ~5,500 words exceeded the 120s Lambda timeout) surfaced an architectural mismatch: an LLM-heavy 10-stage pipeline running synchronously inside a Lambda function with a hard 120s ceiling. The bandaid fix (raise Lambda timeout) was rejected by Peter in favor of a structural fix: migrate to a DBOS-orchestrated durable workflow that runs the pipeline asynchronously on Railway, with per-step retry, checkpointing, and observability.
 
-Two planning sessions (2026-05-20) produced an APPROVED design doc and an APPROVED execution plan with 40 implementation tasks. Implementation has not yet started. The next agent picks up at Task #4 (T1: create feature branch, T3: Docker container verification of dbos Lambda compatibility).
+**Two planning sessions** (2026-05-20) produced an APPROVED design doc and APPROVED execution plan with 40 tasks.
+
+**Two implementation sessions** (2026-05-20 + 2026-05-21) shipped **Phase A (foundation)** as commit `1bfd42d`, **Phase B-1 (action-item workflow + steps)** as `6e51059`, **Phase B-2 (deal workflow + steps + repository idempotency fixes)** as `6e11307`. **10 rounds of `/codex review` absorbed** across these phases (9 HIGHs + 4 MEDIUMs resolved).
+
+**The next agent picks up at Phase C (T13-T17 Lambda dispatcher cutover, ~1.5 hrs).** Phases D/E/F still ahead (retire `/process`, tests, deploy + DLQ replay). See "Picking up from Phase B complete — Phase C resumption guide" below for the orientation sequence.
 
 ---
 
@@ -188,9 +192,13 @@ For context if the next agent needs to re-verify any claim:
 
 ## Resumption signal to next agent
 
-When the next session opens, the user (Peter) will likely say something like "resume DBOS migration per plan, run T1 and T3."
+**(Historical — Phase A entry point, kept for trajectory record. The current
+entry point is Phase C; see "Picking up from Phase B complete — Phase C
+resumption guide" below.)**
 
-Your sequence should be:
+When the original implementation session opened, the user (Peter) said something like "resume DBOS migration per plan, run T1 and T3."
+
+The original sequence was:
 
 1. **Acknowledge resumption.** Read this handoff doc + the plan's RESUMPTION CHECKLIST + design doc + memory index. ~5–10 min.
 2. **Confirm understanding via prose.** State which task you're starting with, the next 2–3 tasks, any deviations from your read of the plan. Wait for greenlight.
@@ -199,6 +207,140 @@ Your sequence should be:
 5. **If T3 fails:** stop. Surface to Peter the failure mode + recommendation: fall back to Approach A per plan documented contingency. Wait for greenlight before any further work.
 
 The 2-week rollback window starts when Phase 2 deploys (T29). Phase 3 (T31 — delete /process route) happens Day 14+ as a follow-up deploy in a separate PR.
+
+---
+
+## Picking up from Phase B complete — Phase C resumption guide
+
+**This is the CURRENT entry point for the next agent.** Phase A + B-1 + B-2 are shipped as `feat/dbos-migration` commits (1bfd42d → 6e51059 → 6e11307). Phase C (Lambda dispatcher cutover, T13–T17) is the next concrete work.
+
+### Step 1 — Orient (10 min, mandatory reading)
+
+In this exact order:
+
+1. **This doc, top-to-bottom.** Especially: TL;DR (current state), "Phase A + B execution log" (what shipped, in what shape), "Locked decisions (consolidated)" (D1–D5 + Open #3 settled state + State DB + Cutover + Workflow ID format), "Known limitations" (3 deferred follow-ups documented from B-2 codex), "Phase E test-coverage backlog" (T22/T23 inputs).
+2. **`docs/plans/2026-05-20-dbos-migration-execution-plan.md`** — RESUMPTION CHECKLIST at top (the architectural shape that was locked). Phase C tasks are T13–T17.
+3. **Memory index** at `~/.claude/projects/-Users-peteroneil-EQ-CORE-action-item-graph/memory/MEMORY.md`. Pay attention to:
+   - `feedback_autonomous_execution.md` — Peter's execution preference
+   - `feedback_plan_literal_wording.md` — when the plan already settled a question, don't re-surface
+   - `feedback_secret_handoff_pattern.md` — hostname + endpoint ID + role only when surfacing credentials, NEVER password literals
+   - `pattern_dbos_workflow_parity_rules.md` — **MANDATORY READ.** 6 rules earned the hard way across 10 codex rounds in Phase A/B. Apply preemptively in Phase C — same class of bug would replicate.
+   - `reference_neon_dbos_state_dbs.md` — where DBOS state DBs live + direct-connection requirement
+4. **The B-1 + B-2 commits** via `git log --stat 1bfd42d..HEAD` — gives you the full picture of what was added.
+
+### Step 2 — Surface understanding before touching code
+
+Before any code change, confirm with Peter:
+- Which task you're starting with (should be T13 from the execution plan)
+- Your understanding of T13–T17 and how they interact
+- Anything that doesn't match your read of the plan
+- Any uncertainty about the locked architecture
+
+Wait for greenlight before executing.
+
+### Step 3 — Phase C scope (T13–T17, ~1.5 hrs estimated)
+
+Per `docs/plans/2026-05-20-dbos-migration-execution-plan.md:355-361`:
+
+- **T13** Modify `src/action_item_graph/lambda_ingest/handler.py`: replace `submit_to_railway()` with two `DBOSClient.enqueue()` calls (one per workflow), use `SetWorkflowID` + `workflow_timeout=900`, emit CloudWatch metric `partial_enqueue_pair_count` on first-succeeds-second-fails case.
+- **T14** Modify `src/action_item_graph/lambda_ingest/config.py`: add `DBOS_SYSTEM_DATABASE_URL` reference. Remove `API_BASE_URL`, `WORKER_API_KEY`, `HTTP_TIMEOUT_SECONDS`, `MAX_RETRIES`.
+- **T15** Modify `src/action_item_graph/lambda_ingest/secrets.py`: replace `get_worker_api_key()` with `get_dbos_system_database_url()`.
+- **T16** Delete `src/action_item_graph/lambda_ingest/api_client.py` (and its tests in T21).
+- **T17** Update `infra/__main__.py` `lambda_env_vars` to reflect T13/T14 changes.
+
+**Pre-deploy still required at T29 (not T13–T17):**
+- `pulumi config set --secret dbos-system-database-url <DIRECT_URL>` — Peter has the direct URL in his vault per the agreed handoff protocol.
+- Railway env var `DBOS_SYSTEM_DATABASE_URL` set in Railway's dashboard (manual).
+- `scripts/package_lambda.sh` modification to include `dbos` + `psycopg[binary]` in the Lambda zip install list (currently the script installs `pydantic pydantic-settings httpx "aws-lambda-powertools[tracer]"` — the Phase A T3 Docker verification confirmed dbos+psycopg add ~24 MB, landing at ~30 MB total).
+
+### Step 4 — Apply the earned patterns preemptively
+
+The 6 rules in `pattern_dbos_workflow_parity_rules.md` are MANDATORY for any code change in T13. In particular:
+
+- **Rule 1:** No validation logic inside a retryable Lambda code path. The Lambda dispatcher's `DBOSClient.enqueue` calls should fail-fast on missing fields, not get wrapped in retry semantics. SQS will redeliver if Lambda raises; DBOS will reject duplicate enqueues — that's the layered safety net.
+- **Rule 5:** The Lambda dispatcher passes `envelope_dict` to the workflow. The workflow itself derives the authoritative interaction_id from extraction's output (already done in B-1/B-2). Don't replicate that derivation in the Lambda.
+- **Rule 6:** No new repository methods called from the Lambda. T13 is purely a `DBOSClient.enqueue` call — no Neo4j writes from Lambda. Idempotency is a workflow concern, not a Lambda concern.
+
+### Step 5 — Codex review discipline
+
+Apply the same arc that worked for Phase B:
+
+- **Run `/codex review`** after T13–T17 are done. Expect 1–3 rounds (Phase C is smaller surface than B — the Lambda dispatcher is ~50 LOC change, ~150 LOC after handler refactor).
+- **Stop signal:** codex explicit "no ship-blocking findings."
+- **Constrained prompt:** include the diff in the prompt (codex review with `--base main` won't capture uncommitted; B-1/B-2 used the `codex exec` path with explicit `git diff --cached HEAD` body).
+- **Expected findings:** retry-semantics on `DBOSClient.enqueue` failures (does it retry transparently? does Lambda fail and let SQS redeliver?), idempotency of dual-enqueue (what if one succeeds and the second fails — see plan's `partial_enqueue_pair_count` metric design), CloudWatch metric emission failure modes.
+
+### Step 6 — Surface at natural breaks (NOT every task)
+
+Per Peter's `feedback_autonomous_execution.md`:
+
+- Mid-T13 if `DBOSClient.enqueue` signature in `dbos==2.22.0` doesn't match what the plan assumed (Open #21 was verified during /plan-eng-review at the planning stage).
+- Post-T13–T17 + codex absorption before committing.
+- If you discover a Phase C concern that contradicts a locked B-1/B-2 decision.
+- Otherwise: execute autonomously.
+
+### Step 7 — After T13–T17, Phase D/E/F roadmap
+
+- **Phase D (T18–T20)** retires the `/process` HTTP route, `dispatcher.py`, `api_client.py`. **DO NOT do Phase D in the same PR as Phase C.** Phase D runs Day 14+ post-Phase 2 deploy per the locked 3-phase migration. The 2-week rollback window depends on `/process` staying alive during Phase 1+2.
+- **Phase E (T21–T35)** is the test build-out — Phase E test-coverage backlog enumerated in this doc. T22 + T23 are the unit-test-per-step work. T25a (deterministic mock regression) is BLOCKING for ship. T25b (live-LLM characterization), T32–T35 (compatibility tests + concurrent-write + rollback-with-inflight) are P2.
+- **Phase F (T27–T31)** is deploy + DLQ replay. T27 (`/review` + `/codex review`), T28 (`/ship` creates PR), T29 (`/land-and-deploy` runs Phase 1 + Phase 2 deploys), T30 (DLQ message redrive), T31 (Phase 3 endpoint removal, Day 14+).
+
+---
+
+## Phase A + B execution log (for trajectory context)
+
+### Phase A — Foundation (committed as `1bfd42d`, 2026-05-20 evening)
+
+**Tasks:** T1 (branch) → T3 (Docker verify) → T2 (deps) → T4 (Neon DB) → T5 (Pulumi secret) → T6 (dbos_runtime) → T7 (lifespan wire).
+
+**Key decisions:**
+- T3 GO: dbos==2.22.0 + psycopg[binary] installed cleanly into `public.ecr.aws/lambda/python:3.11-arm64`, final zip 29.84 MB. D1 conditional lock activated to LOCKED.
+- T4: provisioned `eq_aig_dbos_sys` database inside existing `super-glitter-11265514` (eq-dev) Neon project (Option B). Matches LTF's pattern: their DBOS state lives in `neondb.dbos.*` inside the same project. Direct (non-pooler) connection required.
+- T5: Pulumi secret `dbos-system-database-url` added to forwarder. Replaces the implicit "first secret" alias with per-secret exports. The deprecated `secret_arn` alias kept for back-compat.
+- T6/T7: lifespan composition inverted from initial sketch (DBOS is INNER, clients connect first, drain timeout 20s) — Codex Round 1 of Phase A caught the original ordering as a startup race + shutdown sequencing bug.
+
+**Codex rounds:** 3. R1 HIGH×2 + MED. R2 HIGH×1 + MED×2. R3 nothing ship-blocking. All resolved before commit.
+
+### Phase B-1 — Action-item workflow + steps (committed as `6e51059`, 2026-05-21 morning)
+
+**Tasks:** T8 (module skeleton) + T9 (queues) + T10 (14 steps + workflow).
+
+**New files:** `src/action_item_graph/workflows/{__init__,_runtime,_serialization,queues,action_item_steps,action_item_workflow}.py`.
+
+**Refactors:**
+- `pipeline/merger.py` — `_merge_items` split into `construct_merged_action_item_llm()` + `persist_merged_action_item_neo4j()`. Embedding kept in persist (legacy ordering, fixed in B-2 review).
+- `pipeline/owner_resolver.py` — `resolve_batch()` returns NEW ActionItem instances (Open #1 — DBOS replay safety).
+- `api/main.py` — lifespan calls `register_clients(WorkflowClients(...))` BEFORE `async with dbos_lifespan(app)` so DBOS recovery threads can resolve clients.
+
+**Codex rounds:** 3. R1 HIGH×2 (topic-summary LLM prompt parity break + agent_outbox interaction_id source mismatch) + γ defensive (zip len-assert) + δ doc + ζ hygiene. R2 HIGH×1 (R1 fix used wrong source object — fixed to use `m.extracted_item` not `action_item`) + MED×2 (workflow interaction_id leak + S1 silent account_id substitution). R3 MED×1 (`ValidationError` inside @DBOS.step retry-wrapped — moved validation to workflow body). Stop signal: "no new ship-blocking issue beyond that."
+
+### Phase B-2 — Deal workflow + repository idempotency (committed as `6e11307`, 2026-05-21 afternoon)
+
+**Tasks:** T11 (deal workflow + 9-step decomposition with D7 inner refactor) + T12 (retry decorator sweep) + HANDOFF.md (Open #3 V1 stance documented).
+
+**New files:** `src/deal_graph/workflows/{__init__,_serialization,deal_steps,deal_workflow}.py`.
+
+**Refactors:**
+- `deal_graph/pipeline/merger.py` — `_merge_existing` split into `construct_merged_deal_llm()` + `persist_merged_deal_neo4j()` (D7 inner refactor, plan locked D3).
+- **Both repositories** — `create_version_snapshot()` switched from `CREATE { version_id: randomUUID() }` to MERGE on deterministic version_id (UUID5 over `entity_id + source_interaction_id + extraction_content_hash`). **Critical** — this was the highest-frequency retry hazard discovered. The disambiguator is a SHA-256 prefix of the full serialized ExtractedActionItem / ExtractedDeal so two distinct extractions resolving to the same existing entity produce distinct snapshots. **Action-item B-1 commit had the same latent bug**; the B-2 fix covers both retroactively.
+
+**Codex rounds:** 4 (one more than B-1 because Codex started finding repository-layer issues that B-1 review didn't ask about — now codified as **Rule 6** in the patterns memory).
+
+- R1 HIGH (embedding ordering parity break across BOTH mergers) + MED (workflow warnings field dropped) + γ point (later formalized as Rule 6).
+- R2 HIGH (snapshot key collapses 2 extractions → 1 snapshot when sharing entity + source).
+- R3 HIGH (single-field disambiguator could collide; switch to content hash) + HIGH (`_update_status` path bypassed the disambiguator).
+- R4 "No ship-blocking findings" — explicit stop signal.
+
+**Patterns memory:** `pattern_dbos_workflow_parity_rules.md` now has 6 rules earned across these rounds. Read this BEFORE writing Phase C code — same class of bug WILL replicate if not preemptively guarded against.
+
+### Cumulative state at end of Phase B
+
+- **Tests:** 557 passing on every commit. Pre-existing `tests/test_lambda_handler.py` + `tests/test_lambda_secrets.py` still fail at collection (missing `aws_lambda_powertools`/`boto3` — documented in "Known-deferred test failures").
+- **Pyright CLI:** 0 errors on all touched modules.
+- **Branch:** `feat/dbos-migration`, 3 commits ahead of `main`.
+- **Untracked artifacts (not Phase A/B work):** `Claude-Context-Limits.txt`, `docs/plans/2026-02-22-event-consumer-implementation.md`, modified `TODOS.md`. Leave alone.
+- **The single DLQ message** (MessageId `58863f20-3cda-48f7-973d-3002aa31331b`) is still in `action-item-graph-dlq`. Untouched per hard constraint — to be redriven at T30 only.
+- **Direct connection URL for `eq_aig_dbos_sys`** is in Peter's vault (handed off in the original Phase A session; not echoed in any file).
 
 ---
 
@@ -385,7 +527,9 @@ R1 flagged this preemptively.
 
 This was verified to fail on `main` at commit `71dd9fd` before any Phase A work — it is NOT a Phase A regression. The Lambda tests will be rewritten in **T21 (Phase E)** as part of the dispatcher migration, at which point either the Lambda deps move into a `[lambda]` extras group in pyproject.toml, OR the affected tests get conftest.py-level skip guards.
 
-**For future sessions:** when running `pytest`, use `--ignore=tests/test_lambda_handler.py --ignore=tests/test_lambda_secrets.py` to skip the pre-existing red. The remaining 557 tests pass.
+**Added in Phase C (2026-05-21):** `tests/test_lambda_api_client.py` now also fails at collection because `api_client.py` was deleted in T16. The test file remains on disk; it is rewritten in **T21 (Phase E)** alongside the other two Lambda tests as part of the dispatcher migration rewrite.
+
+**For future sessions:** when running `pytest`, use `--ignore=tests/test_lambda_handler.py --ignore=tests/test_lambda_secrets.py --ignore=tests/test_lambda_api_client.py` to skip the pre-existing + Phase C-broken red. The remaining 557 tests pass.
 
 ---
 
