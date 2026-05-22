@@ -24,10 +24,9 @@ dbos_system_database_url = config.require_secret("dbos-system-database-url")
 
 # Phase C cutover (2026-05-21): the Lambda dispatcher no longer POSTs to
 # Railway /process; it enqueues directly via DBOSClient. The `worker-api-key`
-# and `api-base-url` Pulumi config entries are kept on the stack for
-# back-compat (Phase D removes them in a follow-up PR once the deprecated
-# `secret_arn` export alias is retired). The forwarder stack no longer
-# references them — see lambda_env_vars + secrets dicts below.
+# and `api-base-url` Pulumi.prod.yaml config entries are still present in
+# the encrypted stack config but the forwarder no longer reads them —
+# Phase D removes the Pulumi.prod.yaml entries in a follow-up PR.
 
 # ── Create the Forwarder Stack ──
 outputs = create_forwarder_stack(
@@ -65,18 +64,21 @@ pulumi.export("lambda_name", outputs.lambda_name)
 pulumi.export("role_arn", outputs.role_arn)
 pulumi.export("rule_arn", outputs.rule_arn)
 
-# Per-secret ARN exports — replaces the ambiguous "first secret" alias.
-# Each Pulumi config key in the secrets dict gets its own export named
-# ``<key>_secret_arn``. External consumers (CI, ops tooling) read these
-# explicitly instead of inferring from a positional default.
+# Per-secret ARN exports — each Pulumi config key in the secrets dict
+# gets its own export named ``<key>_secret_arn``. External consumers
+# (CI, ops tooling) read these explicitly instead of inferring from a
+# positional default. Post-Phase-C the only entry is
+# ``dbos-system-database-url_secret_arn``.
 for secret_key, secret_arn in outputs.secret_arns_by_name.items():
     pulumi.export(f"{secret_key}_secret_arn", secret_arn)
 
-# DEPRECATED: `secret_arn` was the historical single-secret export. It
-# implicitly meant the worker-api-key ARN (the only secret pre-migration).
-# Kept as an alias so external consumers don't break on the cutover; once
-# all consumers have migrated to the explicit `worker-api-key_secret_arn`
-# export, this can be removed (planned with Phase 3 cleanup, T31).
-_worker_api_key_arn = outputs.secret_arns_by_name.get("worker-api-key")
-if _worker_api_key_arn is not None:
-    pulumi.export("secret_arn", _worker_api_key_arn)
+# The historical ``secret_arn`` export (single-secret alias that meant
+# the worker-api-key ARN pre-migration) was removed in this PR. Phase C
+# dropped ``worker-api-key`` from the secrets dict, which made the
+# back-compat-guarded ``pulumi.export("secret_arn", ...)`` block a no-op
+# — the comment claimed back-compat preservation but the code emitted
+# nothing. Phase F /codex Round 2 caught the discrepancy. Grep audit
+# (CI workflow, scripts/, sibling EQ-CORE repos) found zero consumers
+# of the legacy ``secret_arn`` Pulumi output, so dropping the dead
+# block is safe. Future consumers should use the explicit
+# ``<key>_secret_arn`` exports above.
