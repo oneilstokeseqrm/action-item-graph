@@ -22,13 +22,19 @@ echo "=== Building Lambda package ==="
 echo "Build dir: $BUILD_DIR"
 
 # 1. Install minimal dependencies for arm64 Lambda runtime
+# DBOS + psycopg[binary] added in Phase C of the DBOS migration (2026-05-21)
+# — the dispatcher uses DBOSClient.enqueue directly. Phase A T3 Docker
+# verification confirmed dbos==2.22.0 + psycopg[binary] land at ~30 MB total,
+# well under Lambda's 50 MB direct-upload threshold. httpx was removed
+# alongside api_client.py — the Lambda no longer makes HTTP calls.
 echo "--- Installing dependencies ---"
 uv pip install \
     --target "$BUILD_DIR" \
     --python-platform aarch64-manylinux2014 \
     --python-version 3.11 \
     --only-binary :all: \
-    pydantic pydantic-settings httpx "aws-lambda-powertools[tracer]"
+    pydantic pydantic-settings "aws-lambda-powertools[tracer]" \
+    "dbos>=2.22.0,<3.0" "psycopg[binary]>=3.2.0"
 
 # 2. Copy only the lambda_ingest subpackage
 echo "--- Copying Lambda code ---"

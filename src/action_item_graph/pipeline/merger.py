@@ -8,6 +8,7 @@ Executes match decisions from the matcher:
 - link_related: Create new but link via relationship
 """
 
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -24,6 +25,24 @@ from ..repository import ActionItemRepository
 from .matcher import MatchResult
 
 logger = get_logger(__name__)
+
+
+def _extraction_content_hash(extraction: ExtractedActionItem) -> str:
+    """Stable per-extraction content hash for snapshot disambiguation.
+
+    Hashes the FULL serialized ExtractedActionItem so two extractions
+    that share ``action_item_text`` but differ in any other field
+    (confidence, owner_type, implied_status, conversation_context, etc.)
+    produce distinct snapshots. Two byte-identical extractions still
+    collapse — and that's correct: byte-identical extractions are an
+    upstream consolidation concern, not a snapshot concern.
+
+    Returns a hex-encoded SHA-256 short prefix (16 hex chars, 64 bits)
+    that's wide enough to avoid collisions across realistic envelope
+    sizes and narrow enough to keep the UUID5 input short.
+    """
+    canonical = extraction.model_dump_json(round_trip=True)
+    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()[:16]
 
 
 # Map implied status strings to ActionItemStatus enum
@@ -266,12 +285,17 @@ class ActionItemMerger:
         if extraction.implied_status:
             new_status = STATUS_MAP.get(extraction.implied_status, ActionItemStatus.OPEN)
 
-        # Create version snapshot before update
+        # Create version snapshot before update. The disambiguator
+        # ensures two distinct status updates of the same item from the
+        # same interaction get distinct snapshot rows (Codex B-2 R3
+        # absorption — _update_status was previously omitted from the
+        # disambiguator pass-through).
         await self.repository.create_version_snapshot(
             action_item_id=existing_id,
             tenant_id=tenant_id,
             change_summary=f"Status updated to {new_status.value} based on: {extraction.summary}",
             source_interaction_id=interaction.interaction_id,
+            extraction_disambiguator=_extraction_content_hash(extraction),
         )
 
         # Update status
@@ -300,30 +324,40 @@ class ActionItemMerger:
             },
         )
 
-    async def _merge_items(
+    async def construct_merged_action_item_llm(
         self,
-        existing_id: str,
         existing_props: dict[str, Any],
         extraction: ExtractedActionItem,
-        interaction: Interaction,
-        action_item: ActionItem,
-    ) -> MergeResult:
+    ) -> dict[str, Any]:
         """
-        Merge a new extraction into an existing ActionItem using LLM synthesis.
+        Pure-LLM phase of merging (no Neo4j writes, no embedding call).
 
-        Args:
-            existing_id: ID of existing ActionItem to update
-            existing_props: Current properties of the existing item
-            extraction: The new extraction to merge in
-            interaction: Source interaction
-            action_item: ActionItem model (has embeddings)
+        Calls the synthesis LLM to construct a ``MergedActionItem`` and
+        returns it as a serializable dict so the result can be DBOS-
+        checkpointed and consumed by
+        :meth:`persist_merged_action_item_neo4j` as a separate step.
+
+        The conditional embedding call is intentionally NOT in this
+        step. Legacy ordering (Codex B-2 absorption) is
+        ``snapshot → embedding → update`` — moving the embedding into
+        this LLM step would change the failure-path write semantics
+        (the legacy code's snapshot persists if embedding fails; a
+        pre-snapshot embedding would leave the system unsnapshotted on
+        embedding failure). Keep the embedding call inside the persist
+        method between snapshot and update.
+
+        Codex Phase B review absorbed #10: a single ``_merge_items``
+        method that mixed LLM and Neo4j-write meant a retry could
+        produce divergent ``MergedActionItem`` outputs while Neo4j had
+        partial writes from the prior attempt. Splitting LLM from
+        persist lets DBOS checkpoint the LLM output once; retries reuse
+        the cached output.
 
         Returns:
-            MergeResult for the merge
+            Dict containing ``merged``: the ``MergedActionItem.model_dump()``
+            output. The embedding (when applicable) is computed by the
+            persist step in legacy ordering.
         """
-        tenant_id = action_item.tenant_id
-
-        # Build merge prompt and get synthesized result
         messages = build_merge_prompt(
             existing_text=existing_props.get('action_item_text', ''),
             existing_summary=existing_props.get('summary', ''),
@@ -351,12 +385,54 @@ class ActionItemMerger:
             response_model=MergedActionItem,
         )
 
-        # Create version snapshot before update
+        return {
+            'merged': merged.model_dump(),
+        }
+
+    async def persist_merged_action_item_neo4j(
+        self,
+        *,
+        llm_result: dict[str, Any],
+        existing_id: str,
+        existing_props: dict[str, Any],
+        interaction: Interaction,
+        action_item: ActionItem,
+        extraction: ExtractedActionItem | None = None,
+    ) -> MergeResult:
+        """
+        Mostly-Neo4j-write phase of merging.
+
+        Consumes the dict produced by
+        :meth:`construct_merged_action_item_llm` and applies the writes:
+        version snapshot, then optionally an embedding refresh (the only
+        LLM call in this phase, ordered BETWEEN snapshot and update for
+        legacy parity per Codex B-2 absorption), then update_action_item,
+        link_to_interaction, and owner link if changed.
+
+        Idempotent under retry because all Neo4j operations are
+        MERGE-keyed: the snapshot uses a deterministic version_id
+        (action_item_id + source_interaction_id), update_action_item
+        SETs are idempotent, and the owner link uses MERGE.
+        """
+        merged = MergedActionItem.model_validate(llm_result['merged'])
+        tenant_id = action_item.tenant_id
+
+        # Create version snapshot before update (legacy ordering).
+        # ``extraction_disambiguator`` is a content hash of the full
+        # ExtractedActionItem (Codex B-2 R3 absorption) — using a hash
+        # instead of just ``action_item_text`` means two extractions
+        # with identical text but different fields (confidence,
+        # implied_status, owner_type, etc.) get distinct version_ids,
+        # while truly-byte-identical extractions still collapse (which
+        # is fine: that's a consolidation problem upstream).
         await self.repository.create_version_snapshot(
             action_item_id=existing_id,
             tenant_id=tenant_id,
             change_summary=merged.evolution_summary,
             source_interaction_id=interaction.interaction_id,
+            extraction_disambiguator=(
+                _extraction_content_hash(extraction) if extraction else None
+            ),
         )
 
         # Build updates dict
@@ -376,13 +452,17 @@ class ActionItemMerger:
                 ActionItemStatus.OPEN,
             ).value
 
-        # Update embedding_current if content changed significantly
+        # Embedding refresh between snapshot and update — legacy ordering
+        # (Codex B-2 absorption preserving _merge_items failure semantics).
+        # The embedding call is the only LLM operation in this otherwise
+        # pure-Neo4j-write phase; placing it here matches the legacy
+        # ``snapshot → embedding → update`` order.
         if merged.should_update_embedding:
             new_embedding = await self.openai.create_embedding(merged.action_item_text)
             updates['embedding_current'] = new_embedding
 
         # Apply updates
-        updated = await self.repository.update_action_item(
+        await self.repository.update_action_item(
             action_item_id=existing_id,
             tenant_id=tenant_id,
             updates=updates,
@@ -419,6 +499,37 @@ class ActionItemMerger:
                 'embedding_updated': merged.should_update_embedding,
                 'status_changed': merged.implied_status is not None,
             },
+        )
+
+    async def _merge_items(
+        self,
+        existing_id: str,
+        existing_props: dict[str, Any],
+        extraction: ExtractedActionItem,
+        interaction: Interaction,
+        action_item: ActionItem,
+    ) -> MergeResult:
+        """
+        Merge a new extraction into an existing ActionItem using LLM synthesis.
+
+        Implemented as a sequential call to
+        :meth:`construct_merged_action_item_llm` followed by
+        :meth:`persist_merged_action_item_neo4j`. The legacy
+        ``/process`` HTTP route enters here; the DBOS workflow path
+        calls the two methods directly as S9a + S9b steps, gaining
+        per-step retry isolation.
+        """
+        llm_result = await self.construct_merged_action_item_llm(
+            existing_props=existing_props,
+            extraction=extraction,
+        )
+        return await self.persist_merged_action_item_neo4j(
+            llm_result=llm_result,
+            existing_id=existing_id,
+            existing_props=existing_props,
+            interaction=interaction,
+            action_item=action_item,
+            extraction=extraction,
         )
 
     async def _create_and_link(

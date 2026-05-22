@@ -12,8 +12,10 @@ dependencies = [
     "numpy>=1.26.0",
     "structlog>=24.0.0",
     "fastuuid>=0.14",
-    "sqlalchemy[asyncio]>=2.0.0",
+    "sqlalchemy[asyncio]>=2.0.43",
     "asyncpg>=0.29.0",
+    "dbos>=2.22.0,<3.0",
+    "psycopg[binary]>=3.2.0",
 ]
 
 [project.optional-dependencies]
@@ -27,6 +29,15 @@ dev = [
 api = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
+    "pydantic-settings>=2.0.0",
+]
+lambda = [
+    # Bundled into the Lambda zip by scripts/package_lambda.sh, NOT installed
+    # into the runtime image. Listed here so the test runner can collect
+    # Lambda-dispatcher tests locally with `uv sync --extra lambda`. Without
+    # the extra, the Lambda test modules skip via `pytest.importorskip`.
+    "aws-lambda-powertools[tracer]>=3.0.0",
+    "boto3>=1.34.0",
     "pydantic-settings>=2.0.0",
 ]
 

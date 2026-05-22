@@ -2,6 +2,63 @@
 
 All notable changes to the Action Item Graph project.
 
+## [0.3.0] - 2026-05-22
+
+### Added - DBOS Durable Workflow Migration
+
+#### Architecture
+- **DBOS workflow orchestration** for the ingest path — Lambda dispatcher returns 200 in sub-second time after enqueueing both pipelines; pipeline duration no longer bounded by Lambda's 120s timeout
+- **Per-step retry with deterministic replay** — each LLM call, Neo4j MERGE, and Postgres write is a checkpointed `@DBOS.step` with explicit retry policy; transient OpenAI/Neon errors no longer cascade into full-pipeline failures
+- **DBOS workflow registry** as the operator surface — failed workflows visible in `dbos.workflow_status` with full input/output, replay capability, and per-step granularity (replaces the DLQ as the primary operator surface)
+- **No upper bound on pipeline duration** within DBOS's 15-minute workflow timeout (Open #19 / `workflow_timeout=900`)
+
+#### New Modules
+- `src/action_item_graph/dbos_runtime.py` — DBOS substrate initialization + FastAPI lifespan integration
+- `src/action_item_graph/workflows/` — action-item pipeline as 14-step DBOS workflow (S1-S14 with S9/S10 LLM-vs-write splits per Codex #10) + queues + serialization helpers + client registry
+- `src/deal_graph/workflows/` — deal pipeline as 9-step DBOS workflow (with D7 inner merger refactor)
+
+#### New Infrastructure
+- Neon database `eq_aig_dbos_sys` (direct non-pooler connection) for DBOS workflow state
+- Pulumi secret `dbos-system-database-url` for Lambda → Neon connection
+- CloudWatch metric `partial_enqueue_pair_count` for first-succeeds-second-fails split-window detection
+
+#### Test Coverage
+- 87 new tests across the migration (567 → 654 net delta vs main)
+- Workflow body validation gates, authoritative interaction_id (Rule 5), per-step fail-open contracts
+- Behavioral contract tests for the workflow path (T25a, scoped down to 5 contracts per the scope decision documented in `docs/plans/2026-05-20-DBOS-MIGRATION-HANDOFF.md`)
+- Compatibility tests for Phase 1 mid-state (T32) + Phase 2 deploy-order mistakes (T33) + W2 concurrent execution (T34)
+- Idempotency tests for the deterministic-UUID5 retry-safety pattern (Topic + TopicVersion + Deal CREATEs)
+- Cross-phase architectural cohesion test (`test_api_main.py::TestDBOSWorkflowRegistration`) that pins both workflow names in the DBOS registry post-import
+
+### Changed
+
+- **Lambda dispatcher** (`src/action_item_graph/lambda_ingest/handler.py`) — rewritten as `DBOSClient.enqueue` dispatcher; partial-enqueue split window emits CloudWatch metric before re-raising for SQS redelivery
+- **Repository idempotency for retry safety** — all CREATE-with-randomUUID patterns reached from retryable DBOS steps converted to MERGE on deterministic UUID5 keys:
+  - `create_version_snapshot` (action-item + deal): UUID5 over `(entity_id, source_interaction_id, content_hash)`
+  - `create_topic`: UUID5 over `(tenant_id, account_id, canonical_name, source_action_item_id)`
+  - `create_topic_version`: UUID5 over `(topic_id, changed_by_action_item_id)`
+  - Deal `_create_new`: UUID5 over `(tenant_id, source_interaction_id, content_hash)` (was uuid7)
+- **Merger refactor** — `_merge_items` / `_merge_existing` split into `construct_*_llm` + `persist_*_neo4j` at the function level for DBOS retry safety; legacy entry paths preserved during the migration window
+- **Owner resolver** (`OwnerPreResolver.resolve_batch`) — returns NEW ActionItem instances instead of mutating in-place (DBOS replay safety)
+- **Workflow ID format** locked at `f"action-item-graph:{pipeline}:interaction-{uuid}"`
+
+### Fixed
+
+- **`deal_workflow` reads `opportunity_id` from `extras`** to match `EnvelopeV1.opportunity_id` @property — Case A targeted-deal flows would have silently fallen through to discovery mode under the prior workflow code path
+- **`deal_workflow` registered in production import chain** — the module was never imported in production, so its `@DBOS.workflow()` decoration never executed and the DBOS workflow registry was missing `deal_workflow`. Phase 2 deploy would have manifested as deal pipeline silently inert. Fix: side-effect import in `action_item_graph/workflows/__init__.py`. Caught by full-PR codex review after 12 prior phase-scoped reviews missed it.
+- **Topic deterministic-ID collapse** — earlier deterministic-ID work over `(tenant, account, canonical_name)` collapsed legitimate batch-mate Topics into one node (action_item_count under-reported, summary reflecting only first item). Fix: include `source_action_item_id` in the key — preserves retry safety AND legacy "two distinct Topics per same-canonical-name in one batch" parity.
+
+### Removed
+
+- `src/action_item_graph/lambda_ingest/api_client.py` — HTTP forwarder retired (Lambda no longer makes HTTP calls; `httpx` dropped from the Lambda zip)
+- `secret_arn` Pulumi export — dead block after Phase C removed `worker-api-key` from the secrets dict; grep audit confirmed zero external consumers
+
+### Migration Notes
+
+This is **Phase A through Phase E** of a 3-phase deploy. Phase D (retire `/process` HTTP route + `dispatcher.py`) ships as a separate PR Day 14+ post-deploy. The 2-week rollback window depends on `/process` staying alive during Phase 1+2. See `docs/plans/2026-05-20-DBOS-MIGRATION-HANDOFF.md` for the full migration arc, locked decisions, and the deletion-seam list for the Phase D follow-up.
+
+**T29 deploy gate:** requires `pulumi config set --secret dbos-system-database-url <DIRECT_URL>` + Railway `DBOS_SYSTEM_DATABASE_URL` env var. **T30 post-deploy:** parked DLQ message (`58863f20-3cda-48f7-973d-3002aa31331b`) redrives via `aws sqs start-message-move-task` as the live integration test.
+
 ## [0.2.0] - 2026-01-25
 
 ### Added - Topic Grouping (Phase 7)

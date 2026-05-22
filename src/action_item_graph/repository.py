@@ -10,6 +10,7 @@ Provides:
 
 from datetime import datetime
 from typing import Any
+import uuid
 from uuid import UUID
 
 from .clients.neo4j_client import Neo4jClient
@@ -337,9 +338,18 @@ class ActionItemRepository:
         tenant_id: UUID,
         change_summary: str,
         source_interaction_id: UUID | None = None,
+        extraction_disambiguator: str | None = None,
     ) -> dict[str, Any]:
         """
         Create a version snapshot before updating an ActionItem.
+
+        Idempotent under retry: the ``version_id`` is deterministic per
+        ``(action_item_id, source_interaction_id, ai.version)``, and the
+        Cypher uses MERGE so a retry returns the existing snapshot
+        instead of duplicating. The Phase B-2 codex review caught the
+        prior ``CREATE { version_id: randomUUID() }`` shape as a
+        DBOS-retry hazard — see
+        ``memory/pattern_dbos_workflow_parity_rules.md`` Rule 6.
 
         This preserves the current state as an ActionItemVersion node.
 
@@ -352,24 +362,41 @@ class ActionItemRepository:
         Returns:
             Created ActionItemVersion node properties
         """
+        # Deterministic version_id for DBOS-retry idempotency. UUID5 over
+        # (action_item_id, source_interaction_id, extraction_disambiguator)
+        # gives a stable ID across retries. ``extraction_disambiguator``
+        # distinguishes two distinct merges of the SAME action item from
+        # the SAME interaction (Codex B-2 R3 absorption). Callers should
+        # pass a content-derived hash of the upstream extracted object
+        # (see ``ActionItemMerger._extraction_content_hash``) so two
+        # extractions sharing one field but differing on others get
+        # distinct snapshots. Without a disambiguator the key collapses
+        # to (action_item, interaction) — safe for the
+        # 1-merge-per-interaction common case + all retry patterns. See
+        # ``memory/pattern_dbos_workflow_parity_rules.md`` Rule 6.
+        version_id = str(uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f'aig-version:{action_item_id}:'
+            f'{source_interaction_id or "none"}:'
+            f'{extraction_disambiguator or ""}',
+        ))
+
         query = """
             MATCH (ai:ActionItem {action_item_id: $action_item_id, tenant_id: $tenant_id})
-            CREATE (v:ActionItemVersion {
-                version_id: randomUUID(),
-                action_item_id: ai.action_item_id,
-                tenant_id: ai.tenant_id,
-                version: ai.version,
-                action_item_text: ai.action_item_text,
-                summary: ai.summary,
-                owner: ai.owner,
-                status: ai.status,
-                due_date: ai.due_date,
-                change_summary: $change_summary,
-                change_source_interaction_id: $source_interaction_id,
-                created_at: datetime(),
-                valid_from: ai.created_at,
-                valid_until: datetime()
-            })
+            MERGE (v:ActionItemVersion {version_id: $version_id, tenant_id: $tenant_id})
+            ON CREATE SET
+                v.action_item_id = ai.action_item_id,
+                v.version = ai.version,
+                v.action_item_text = ai.action_item_text,
+                v.summary = ai.summary,
+                v.owner = ai.owner,
+                v.status = ai.status,
+                v.due_date = ai.due_date,
+                v.change_summary = $change_summary,
+                v.change_source_interaction_id = $source_interaction_id,
+                v.created_at = datetime(),
+                v.valid_from = ai.created_at,
+                v.valid_until = datetime()
             MERGE (ai)-[:HAS_VERSION]->(v)
             RETURN v {.*} as version
         """
@@ -378,6 +405,7 @@ class ActionItemRepository:
             {
                 'action_item_id': action_item_id,
                 'tenant_id': str(tenant_id),
+                'version_id': version_id,
                 'change_summary': change_summary,
                 'source_interaction_id': str(source_interaction_id)
                 if source_interaction_id
@@ -923,18 +951,39 @@ class ActionItemRepository:
         topic: ActionItemTopic,
     ) -> dict[str, Any]:
         """
-        Create an ActionItemTopic node and link to Account.
+        Create or return an existing ActionItemTopic node, linked to Account.
+
+        Idempotent under retry: MERGE-keyed on
+        ``(tenant_id, action_item_topic_id)`` so a second call with the
+        same topic.id returns the existing row instead of duplicating.
+        S10b (``topic_resolution_persist_step``) is
+        ``retries_allowed=True``; without MERGE, a transient mid-step
+        Neo4j or OpenAI error would trigger a retry that creates a
+        duplicate Topic node with the same canonical_name. Phase F
+        /review absorption — same Rule 6 class as the Phase B-2 fix to
+        ``create_version_snapshot``. The caller
+        (``topic_executor._create_topic``) derives a deterministic
+        ``topic.id`` via ``uuid5``, so two retries produce the same
+        MERGE key and the second call no-ops.
+
+        See ``memory/pattern_dbos_workflow_parity_rules.md`` Rule 6.
 
         Args:
-            topic: ActionItemTopic model with embeddings
+            topic: ActionItemTopic model with embeddings. ``topic.id``
+                MUST be deterministic per upstream resolution (the
+                caller is responsible).
 
         Returns:
-            Created ActionItemTopic node properties
+            Created (or existing) ActionItemTopic node properties.
         """
         props = topic.to_neo4j_properties()
 
         query = """
-            CREATE (t:ActionItemTopic $props)
+            MERGE (t:ActionItemTopic {
+                action_item_topic_id: $topic_id,
+                tenant_id: $tenant_id
+            })
+            ON CREATE SET t = $props
             WITH t
             OPTIONAL MATCH (a:Account {account_id: $account_id, tenant_id: $tenant_id})
             FOREACH (_ IN CASE WHEN a IS NOT NULL THEN [1] ELSE [] END |
@@ -946,6 +995,7 @@ class ActionItemRepository:
             query,
             {
                 'props': props,
+                'topic_id': str(topic.id),
                 'account_id': topic.account_id,
                 'tenant_id': str(topic.tenant_id),
             },
@@ -1019,11 +1069,26 @@ class ActionItemRepository:
         version_number: int,
         name: str,
         summary: str,
+        version_id: str,
         embedding_snapshot: list[float] | None = None,
         changed_by_action_item_id: UUID | None = None,
     ) -> dict[str, Any]:
         """
-        Create an ActionItemTopicVersion snapshot.
+        Create or return an existing ActionItemTopicVersion snapshot.
+
+        Idempotent under retry: MERGE-keyed on
+        ``(tenant_id, version_id)`` so the second call with the same
+        version_id returns the existing row. S10b
+        (``topic_resolution_persist_step``) is ``retries_allowed=True``;
+        without MERGE, a retry would create a duplicate version row with
+        a fresh random UUID. Phase F /review absorption — same Rule 6
+        class as the Phase B-2 fix to ``create_version_snapshot``. The
+        callers (``topic_executor._create_topic`` and
+        ``_update_topic_summary``) derive a deterministic ``version_id``
+        via ``uuid5(NAMESPACE_URL, f'aig-topic-version:{topic_id}:{changed_by_action_item_id}')``
+        so two retries produce the same MERGE key.
+
+        See ``memory/pattern_dbos_workflow_parity_rules.md`` Rule 6.
 
         Args:
             topic_id: ActionItemTopic UUID string
@@ -1031,25 +1096,27 @@ class ActionItemRepository:
             version_number: Version number
             name: Topic name at this version
             summary: Topic summary at this version
+            version_id: Caller-derived deterministic UUID5 string for
+                MERGE idempotency under retry.
             embedding_snapshot: Optional embedding snapshot
-            changed_by_action_item_id: Action item that triggered this version
+            changed_by_action_item_id: Action item that triggered this
+                version
 
         Returns:
-            Created ActionItemTopicVersion node properties
+            Created (or existing) ActionItemTopicVersion node
+            properties.
         """
         query = """
             MATCH (t:ActionItemTopic {action_item_topic_id: $topic_id, tenant_id: $tenant_id})
-            CREATE (v:ActionItemTopicVersion {
-                version_id: randomUUID(),
-                topic_id: $topic_id,
-                tenant_id: $tenant_id,
-                version_number: $version_number,
-                name: $name,
-                summary: $summary,
-                embedding_snapshot: $embedding_snapshot,
-                changed_by_action_item_id: $changed_by_action_item_id,
-                created_at: datetime()
-            })
+            MERGE (v:ActionItemTopicVersion {version_id: $version_id, tenant_id: $tenant_id})
+            ON CREATE SET
+                v.topic_id = $topic_id,
+                v.version_number = $version_number,
+                v.name = $name,
+                v.summary = $summary,
+                v.embedding_snapshot = $embedding_snapshot,
+                v.changed_by_action_item_id = $changed_by_action_item_id,
+                v.created_at = datetime()
             MERGE (t)-[:HAS_VERSION {version_number: $version_number}]->(v)
             RETURN v {.*} as version
         """
@@ -1058,6 +1125,7 @@ class ActionItemRepository:
             {
                 'topic_id': topic_id,
                 'tenant_id': str(tenant_id),
+                'version_id': version_id,
                 'version_number': version_number,
                 'name': name,
                 'summary': summary,

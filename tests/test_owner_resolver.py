@@ -254,7 +254,7 @@ class TestOwnerPreResolver:
 
     @pytest.mark.asyncio
     async def test_name_resolution_in_place(self):
-        """Should modify ActionItem owner in-place when resolved."""
+        """Should return a new ActionItem with the resolved owner."""
         mock_repo = MagicMock()
         mock_repo.get_owners_for_account = AsyncMock(
             return_value=[_make_owner_node("Peter O'Neill")]
@@ -264,9 +264,10 @@ class TestOwnerPreResolver:
         await resolver.load_cache(TENANT_ID, 'acct_001')
 
         ai = _make_action_item('Peter')  # Short name variant
-        methods = await resolver.resolve_batch([ai])
+        resolved_items, methods = await resolver.resolve_batch([ai])
+        ai = resolved_items[0]
 
-        assert ai.owner == "Peter O'Neill"  # Resolved in-place
+        assert ai.owner == "Peter O'Neill"  # Resolved into a new ActionItem instance
         assert 'substring' in methods
 
     @pytest.mark.asyncio
@@ -279,7 +280,8 @@ class TestOwnerPreResolver:
         await resolver.load_cache(TENANT_ID, 'acct_001')
 
         ai = _make_action_item('Peter')
-        methods = await resolver.resolve_batch([ai])
+        resolved_items, methods = await resolver.resolve_batch([ai])
+        ai = resolved_items[0]
 
         assert ai.owner == 'Peter'  # Unchanged
         assert methods.get('unresolved', 0) == 1
@@ -308,7 +310,8 @@ class TestOwnerPreResolver:
         await resolver.load_cache(TENANT_ID, 'acct_001')
 
         ai = _make_action_item('the account manager', owner_type='role_inferred')
-        methods = await resolver.resolve_batch([ai])
+        resolved_items, methods = await resolver.resolve_batch([ai])
+        ai = resolved_items[0]
 
         assert ai.owner == "Peter O'Neill"
         assert ai.owner_type == 'named'
@@ -335,7 +338,8 @@ class TestOwnerPreResolver:
         await resolver.load_cache(TENANT_ID, 'acct_001')
 
         ai = _make_action_item('someone on the team', owner_type='role_inferred')
-        methods = await resolver.resolve_batch([ai])
+        resolved_items, methods = await resolver.resolve_batch([ai])
+        ai = resolved_items[0]
 
         assert ai.owner == 'someone on the team'  # Unchanged
         assert methods.get('unresolved', 0) == 1
@@ -352,7 +356,8 @@ class TestOwnerPreResolver:
         await resolver.load_cache(TENANT_ID, 'acct_001')
 
         ai = _make_action_item("Peter O'Neill")
-        methods = await resolver.resolve_batch([ai])
+        resolved_items, methods = await resolver.resolve_batch([ai])
+        ai = resolved_items[0]
 
         assert ai.owner == "Peter O'Neill"  # Unchanged (exact match)
         assert methods.get('exact', 0) == 1
@@ -374,7 +379,8 @@ class TestOwnerPreResolver:
         await resolver.load_cache(TENANT_ID, 'acct_001')
 
         ai = _make_action_item('the lead', owner_type='role_inferred')
-        methods = await resolver.resolve_batch([ai])
+        resolved_items, methods = await resolver.resolve_batch([ai])
+        ai = resolved_items[0]
 
         assert ai.owner == 'the lead'  # Unchanged on failure
         assert methods.get('unresolved', 0) == 1
@@ -407,7 +413,7 @@ class TestOwnerCacheContactSeeding:
         cache.add({'canonical_name': 'Jane Smith', 'owner_id': 'o1', 'aliases': []})
         cache.add_contact({'contact_id': 'c1', 'name': 'Jane Smith', 'email': 'jane@acme.com'})
         # Should still resolve to the original owner
-        resolved, method = cache.resolve('Jane Smith')
+        resolved = cache.resolve('Jane Smith')[0]
         assert resolved == 'Jane Smith'
         # But contact_id should still be recorded
         assert cache.get_contact_id('Jane Smith') == 'c1'
@@ -495,7 +501,8 @@ class TestOwnerPreResolverContactSeeding:
         )
 
         ai = _make_action_item('Jane')
-        methods = await resolver.resolve_batch([ai])
+        resolved_items, methods = await resolver.resolve_batch([ai])
+        ai = resolved_items[0]
 
         assert ai.owner == 'Jane Smith'
         assert methods.get('substring', 0) == 1

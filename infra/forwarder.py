@@ -43,7 +43,11 @@ class ForwarderOutputs:
     lambda_name: pulumi.Output[str]
     role_arn: pulumi.Output[str]
     rule_arn: pulumi.Output[str]
-    secret_arn: pulumi.Output[str]
+    # Map of secret_key (as passed in the ``secrets`` dict) → Secrets Manager ARN.
+    # Lets callers export each secret ARN explicitly by name instead of relying
+    # on positional order. Replaces the single ``secret_arn`` field which
+    # silently meant "first secret" when more than one was configured.
+    secret_arns_by_name: dict[str, pulumi.Output[str]]
 
 
 def create_forwarder_stack(
@@ -161,7 +165,7 @@ def create_forwarder_stack(
     )
 
     # ── 6. Secrets Manager Secrets ──
-    secret_arns: list[pulumi.Output[str]] = []
+    secret_arns_by_name: dict[str, pulumi.Output[str]] = {}
     for secret_key, secret_value in secrets.items():
         secret = aws.secretsmanager.Secret(
             f"{service_name}-secret-{secret_key}",
@@ -173,7 +177,8 @@ def create_forwarder_stack(
             secret_id=secret.id,
             secret_string=secret_value,
         )
-        secret_arns.append(secret.arn)
+        secret_arns_by_name[secret_key] = secret.arn
+    secret_arns: list[pulumi.Output[str]] = list(secret_arns_by_name.values())
 
     # ── 7. IAM Role ──
     role = aws.iam.Role(
@@ -288,8 +293,6 @@ def create_forwarder_stack(
     )
 
     # ── Exports ──
-    first_secret_arn = secret_arns[0] if secret_arns else pulumi.Output.from_input("")
-
     return ForwarderOutputs(
         dlq_arn=dlq.arn,
         dlq_url=dlq.url,
@@ -299,5 +302,5 @@ def create_forwarder_stack(
         lambda_name=lambda_fn.name,
         role_arn=role.arn,
         rule_arn=rule.arn,
-        secret_arn=first_secret_arn,
+        secret_arns_by_name=secret_arns_by_name,
     )

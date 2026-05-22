@@ -11,7 +11,7 @@ TopicExecutor handles the persistence operations for topic assignment:
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from ..clients.openai_client import OpenAIClient
 from ..logging import get_logger
@@ -25,6 +25,63 @@ from ..repository import ActionItemRepository
 from .topic_resolver import TopicDecision, TopicResolutionResult
 
 logger = get_logger(__name__)
+
+
+def _topic_id_for_resolution(
+    tenant_id: UUID,
+    account_id: str,
+    canonical_name: str,
+    *,
+    source_action_item_id: str,
+) -> UUID:
+    """Derive a deterministic ActionItemTopic ID for retry-safe MERGE.
+
+    S10b (``topic_resolution_persist_step``) is
+    ``retries_allowed=True``; the prior ``uuid4()`` generation would
+    create a duplicate ActionItemTopic node on every retry. UUID5 over
+    ``(tenant_id, account_id, canonical_name, source_action_item_id)``
+    is stable across retries so the repository MERGE no-ops on the
+    second call — preserving Rule 6 idempotency.
+
+    Including ``source_action_item_id`` in the key is the load-bearing
+    parity choice: two action items in the same batch that both resolve
+    to ``CREATE_NEW`` with the same canonical_name produce DISTINCT
+    topic_ids (and thus distinct Topic nodes). This matches the legacy
+    /process behavior where each call generated a fresh ``uuid4()``.
+    Codex R1 caught that an earlier version of this helper (keyed only
+    on tenant + account + canonical_name) collapsed those two
+    resolutions into one Topic with under-counted action_item_count and
+    a summary reflecting only the first item — a real external-contract
+    drift from legacy.
+
+    Per ``memory/pattern_dbos_workflow_parity_rules.md`` Rule 6. Phase F
+    /codex Round 1 absorption.
+    """
+    return uuid5(
+        NAMESPACE_URL,
+        f'aig-topic:{tenant_id}:{account_id}:'
+        f'{canonical_name}:{source_action_item_id}',
+    )
+
+
+def _topic_version_id(
+    topic_id: str,
+    changed_by_action_item_id: str,
+) -> str:
+    """Derive a deterministic ActionItemTopicVersion ID for retry-safe MERGE.
+
+    Mirrors the action-item version pattern at
+    ``repository.create_version_snapshot``: source-of-change identifier
+    keys the version row. Two retries of the same step produce the same
+    version_id (idempotent MERGE); two different action items affecting
+    the same topic produce different version_ids (distinct rows).
+
+    Per ``memory/pattern_dbos_workflow_parity_rules.md`` Rule 6.
+    """
+    return str(uuid5(
+        NAMESPACE_URL,
+        f'aig-topic-version:{topic_id}:{changed_by_action_item_id}',
+    ))
 
 
 @dataclass
@@ -169,13 +226,27 @@ class TopicExecutor:
             topic_context=extracted.context,
         )
 
-        # Create the ActionItemTopic model
+        # Create the ActionItemTopic model.
+        # ``id`` is deterministic per ``(tenant_id, account_id,
+        # canonical_name, source_action_item_id)`` so S10b retries
+        # converge to the same Topic node via MERGE in
+        # ``repository.create_topic`` (Rule 6). Including the source
+        # action_item_id in the key preserves legacy parity — two
+        # batch-mate action items with the same canonical_name still
+        # produce two distinct Topic nodes, matching the prior
+        # ``uuid4()`` behavior at the entity level. Codex R1 absorption.
+        canonical_name = ActionItemTopic.canonicalize_name(extracted.name)
         topic = ActionItemTopic(
-            id=uuid4(),
+            id=_topic_id_for_resolution(
+                tenant_id,
+                account_id,
+                canonical_name,
+                source_action_item_id=resolution.action_item_id,
+            ),
             tenant_id=tenant_id,
             account_id=account_id,
             name=extracted.name,
-            canonical_name=ActionItemTopic.canonicalize_name(extracted.name),
+            canonical_name=canonical_name,
             summary=summary_result.summary,
             embedding=resolution.embedding,
             embedding_current=resolution.embedding,  # Same initially
@@ -195,13 +266,16 @@ class TopicExecutor:
             method='extracted',
         )
 
-        # Create initial version
+        # Create initial version. ``version_id`` is deterministic per
+        # ``(topic_id, source_action_item_id)`` so S10b retries converge
+        # via MERGE in ``repository.create_topic_version`` (Rule 6).
         await self.repository.create_topic_version(
             topic_id=str(topic.id),
             tenant_id=tenant_id,
             version_number=1,
             name=topic.name,
             summary=topic.summary,
+            version_id=_topic_version_id(str(topic.id), resolution.action_item_id),
             embedding_snapshot=topic.embedding,
             changed_by_action_item_id=UUID(resolution.action_item_id),
         )
@@ -410,13 +484,18 @@ class TopicExecutor:
         topic = await self.repository.get_topic(topic_id, tenant_id)
         current_version = topic.get('version', 1) if topic else 1
 
-        # Create version snapshot before update
+        # Create version snapshot before update. ``version_id`` is
+        # deterministic per ``(topic_id, changed_by_action_item_id)`` so
+        # S10b retries (executor calls this through ``execute_batch``)
+        # converge via MERGE in ``repository.create_topic_version``
+        # (Rule 6).
         await self.repository.create_topic_version(
             topic_id=topic_id,
             tenant_id=tenant_id,
             version_number=current_version,
             name=current_name,
             summary=current_summary,
+            version_id=_topic_version_id(topic_id, changed_by_action_item_id),
             embedding_snapshot=new_embedding,  # Snapshot new embedding if updated
             changed_by_action_item_id=UUID(changed_by_action_item_id),
         )

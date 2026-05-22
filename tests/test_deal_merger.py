@@ -881,13 +881,22 @@ class TestAmountUpdate:
 
 
 class TestOpportunityIdFormat:
-    """Verify that created deals use UUIDv7 opportunity_id."""
+    """Verify that created deals use a deterministic UUIDv5 opportunity_id.
+
+    Phase F /review absorbed a Rule 6 hazard: the prior ``uuid7()``
+    generation in ``_create_new`` would produce a NEW opportunity_id on
+    every D7 (``match_merge_loop_step``) crash-recovery, creating
+    duplicate Deal nodes. UUID5 over
+    ``(tenant_id, source_interaction_id, content_hash)`` is stable
+    across recoveries — see ``memory/pattern_dbos_workflow_parity_rules.md``
+    Rule 6.
+    """
 
     @pytest.mark.asyncio
-    async def test_created_deal_has_uuid7_opportunity_id(
+    async def test_created_deal_has_deterministic_uuid5_opportunity_id(
         self, merger, create_new_match_result,
     ):
-        """opportunity_id on a newly created Deal must be a parseable UUID with version 7."""
+        """opportunity_id on a newly created Deal must be a parseable UUID with version 5."""
         await merger.merge_deal(
             match_result=create_new_match_result,
             tenant_id=TENANT_ID,
@@ -897,7 +906,7 @@ class TestOpportunityIdFormat:
         deal = call_args.args[0]
 
         assert isinstance(deal.opportunity_id, UUID)
-        assert deal.opportunity_id.version == 7
+        assert deal.opportunity_id.version == 5
 
     @pytest.mark.asyncio
     async def test_created_deal_has_deal_ref(
@@ -915,7 +924,7 @@ class TestOpportunityIdFormat:
         assert deal.deal_ref is not None
         assert deal.deal_ref.startswith('deal_')
         assert len(deal.deal_ref) == 21  # 'deal_' + 16 hex chars
-        # Verify it uses the random-heavy tail of the UUID (not timestamp prefix)
+        # Verify it derives from the UUID hex (deterministic content-hash tail)
         assert deal.deal_ref == f'deal_{deal.opportunity_id.hex[-16:]}'
 
     @pytest.mark.asyncio
@@ -931,7 +940,122 @@ class TestOpportunityIdFormat:
         assert isinstance(result.opportunity_id, str)
         # Should be parseable back to UUID
         parsed = UUID(result.opportunity_id)
-        assert parsed.version == 7
+        assert parsed.version == 5
+
+
+class TestDealCreateNewIdempotency:
+    """Verify D7 (``match_merge_loop_step``) crash-recovery safety.
+
+    D7 is ``retries_allowed=False``, but DBOS workflow recovery
+    (container OOM, SIGKILL, redeploy) re-executes the step body from
+    scratch. The prior ``uuid7()``-generated opportunity_id would
+    produce a duplicate Deal node on recovery. The Rule 6 fix derives
+    opportunity_id deterministically from
+    ``(tenant_id, source_interaction_id, content_hash)`` so two
+    recoveries converge to the same id and the repository MERGE on
+    ``(tenant_id, opportunity_id)`` no-ops.
+
+    See ``memory/pattern_dbos_workflow_parity_rules.md`` Rule 6 and
+    HANDOFF.md § "T25a scope decision" justification 1: per-step
+    observable-behavior testing catches cutover divergence.
+    """
+
+    @pytest.mark.asyncio
+    async def test_same_inputs_produce_same_opportunity_id(
+        self, merger, create_new_match_result,
+    ):
+        """Two calls to merge_deal with identical inputs must produce the same opportunity_id."""
+        result1 = await merger.merge_deal(
+            match_result=create_new_match_result,
+            tenant_id=TENANT_ID,
+            source_interaction_id=INTERACTION_ID,
+        )
+        # Reset the mock so the second call's args don't aggregate
+        merger.repository.create_deal.reset_mock()
+        result2 = await merger.merge_deal(
+            match_result=create_new_match_result,
+            tenant_id=TENANT_ID,
+            source_interaction_id=INTERACTION_ID,
+        )
+
+        # The DealMergeResult.opportunity_id (string) must match.
+        assert result1.opportunity_id == result2.opportunity_id
+
+        # The Deal model passed to repository.create_deal must carry the
+        # same opportunity_id both times — the MERGE on
+        # (tenant_id, opportunity_id) is what gives retry idempotency.
+        deal2 = merger.repository.create_deal.call_args.args[0]
+        assert str(deal2.opportunity_id) == result1.opportunity_id
+
+    @pytest.mark.asyncio
+    async def test_different_content_produces_different_opportunity_id(
+        self, merger, sample_extracted_deal, sample_embedding,
+    ):
+        """Two extracted_deals with same opportunity_name but different MEDDIC fields must produce different opportunity_ids."""
+        from copy import deepcopy
+
+        # Same opportunity_name, different stage_assessment → different
+        # content hash → different opportunity_id.
+        deal_a = sample_extracted_deal
+        deal_b = deepcopy(sample_extracted_deal)
+        deal_b.stage_assessment = (
+            'proposal'
+            if deal_a.stage_assessment != 'proposal'
+            else 'qualification'
+        )
+
+        match_a = DealMatchResult(
+            extracted_deal=deal_a,
+            embedding=sample_embedding,
+            match_type='create_new',
+            matched_deal=None,
+            decision=None,
+            candidates_evaluated=0,
+        )
+        match_b = DealMatchResult(
+            extracted_deal=deal_b,
+            embedding=sample_embedding,
+            match_type='create_new',
+            matched_deal=None,
+            decision=None,
+            candidates_evaluated=0,
+        )
+
+        result_a = await merger.merge_deal(
+            match_result=match_a,
+            tenant_id=TENANT_ID,
+            source_interaction_id=INTERACTION_ID,
+        )
+        result_b = await merger.merge_deal(
+            match_result=match_b,
+            tenant_id=TENANT_ID,
+            source_interaction_id=INTERACTION_ID,
+        )
+
+        assert result_a.opportunity_id != result_b.opportunity_id
+
+    @pytest.mark.asyncio
+    async def test_different_interaction_produces_different_opportunity_id(
+        self, merger, create_new_match_result,
+    ):
+        """Same extracted_deal under different source_interaction_ids must produce different opportunity_ids."""
+        from uuid import uuid4 as _uuid4
+
+        interaction_a = _uuid4()
+        interaction_b = _uuid4()
+
+        result_a = await merger.merge_deal(
+            match_result=create_new_match_result,
+            tenant_id=TENANT_ID,
+            source_interaction_id=interaction_a,
+        )
+        result_b = await merger.merge_deal(
+            match_result=create_new_match_result,
+            tenant_id=TENANT_ID,
+            source_interaction_id=interaction_b,
+        )
+
+        assert result_a.opportunity_id != result_b.opportunity_id
 
 
 # =============================================================================

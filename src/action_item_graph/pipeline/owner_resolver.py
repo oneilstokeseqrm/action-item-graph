@@ -246,23 +246,39 @@ class OwnerPreResolver:
     async def resolve_batch(
         self,
         action_items: list[ActionItem],
-    ) -> dict[str, int]:
+    ) -> tuple[list[ActionItem], dict[str, int]]:
         """
-        Resolve owner names for a batch of action items in-place.
+        Resolve owner names for a batch of action items.
+
+        Returns NEW ActionItem instances rather than mutating the inputs.
+        This is required for DBOS replay safety: a step that mutates its
+        input would see already-mutated state on replay (the step's input
+        envelope is a fresh deserialization, but if the step then mutates
+        intermediate state shared with a later step's input, that later
+        step's checkpoint replay would see double-mutation). Returning
+        new objects keeps each step's I/O isolated.
 
         Args:
-            action_items: List of ActionItems to resolve (modified in-place)
+            action_items: Input list; not modified.
 
         Returns:
-            Dict of resolution method counts (e.g., {'exact': 2, 'substring': 1, 'unresolved': 1})
+            Tuple of (resolved_items, method_counts). ``resolved_items``
+            is a new list of the same length, in the same order, with
+            owner/owner_type fields updated per resolution outcome.
+            ``method_counts`` reports e.g.
+            ``{'exact': 2, 'substring': 1, 'unresolved': 1}``.
         """
         if self._cache.is_empty:
-            return {'unresolved': len(action_items)}
+            # Pass items through unchanged; matches the "no cache → no
+            # resolution possible" early-return semantics of the old API.
+            return (list(action_items), {'unresolved': len(action_items)})
 
         method_counts: dict[str, int] = {}
+        resolved_items: list[ActionItem] = []
 
         for ai in action_items:
-            method = await self._resolve_single(ai)
+            new_ai, method = await self._resolve_single(ai)
+            resolved_items.append(new_ai)
             method_counts[method] = method_counts.get(method, 0) + 1
 
         logger.info(
@@ -271,13 +287,19 @@ class OwnerPreResolver:
             total_items=len(action_items),
         )
 
-        return method_counts
+        return (resolved_items, method_counts)
 
-    async def _resolve_single(self, action_item: ActionItem) -> str:
+    async def _resolve_single(
+        self, action_item: ActionItem
+    ) -> tuple[ActionItem, str]:
         """
-        Resolve a single ActionItem's owner. Modifies in-place.
+        Resolve a single ActionItem's owner.
 
-        Returns the resolution method used.
+        Returns a tuple of (possibly-new ActionItem, resolution_method).
+        When the owner field doesn't change, the original ActionItem
+        instance is returned by reference (no unnecessary copy). When the
+        owner is resolved, a new ActionItem is returned via
+        ``model_copy`` — the input is not mutated.
         """
         original_owner = action_item.owner
 
@@ -292,20 +314,24 @@ class OwnerPreResolver:
                     resolved=resolved,
                     method=method,
                 )
-                action_item.owner = resolved
+                update = {'owner': resolved}
                 if action_item.owner_type != 'named':
-                    action_item.owner_type = 'named'
-            return method
+                    update['owner_type'] = 'named'
+                return (action_item.model_copy(update=update), method)
+            return (action_item, method)
 
         # For role_inferred owners, try LLM resolution
         if action_item.owner_type == 'role_inferred' and self.openai_client:
             llm_resolved = await self._resolve_role_via_llm(action_item)
             if llm_resolved:
-                action_item.owner = llm_resolved
-                action_item.owner_type = 'named'
-                return 'llm_role_resolved'
+                return (
+                    action_item.model_copy(
+                        update={'owner': llm_resolved, 'owner_type': 'named'}
+                    ),
+                    'llm_role_resolved',
+                )
 
-        return 'unresolved'
+        return (action_item, 'unresolved')
 
     async def _resolve_role_via_llm(self, action_item: ActionItem) -> str | None:
         """

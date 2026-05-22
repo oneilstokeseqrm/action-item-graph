@@ -1,4 +1,4 @@
-"""Tests for Lambda forwarder configuration."""
+"""Tests for Lambda dispatcher configuration."""
 
 import os
 from unittest.mock import patch
@@ -9,22 +9,23 @@ from action_item_graph.lambda_ingest.config import LambdaConfig
 class TestLambdaConfig:
     def test_config_loads_from_env(self):
         env = {
-            "API_BASE_URL": "https://action-item-graph.up.railway.app",
-            "WORKER_API_KEY": "lambda-secret",
+            "DBOS_SYSTEM_DATABASE_URL": (
+                "postgresql://user:pw@ep-test.us-east-1.aws.neon.tech/eq_aig_dbos_sys?sslmode=require"
+            ),
         }
         with patch.dict(os.environ, env, clear=False):
             config = LambdaConfig()
-            assert config.API_BASE_URL == "https://action-item-graph.up.railway.app"
-            assert config.WORKER_API_KEY == "lambda-secret"
-            assert config.HTTP_TIMEOUT_SECONDS == 100
-            assert config.MAX_RETRIES == 2
+            assert config.DBOS_SYSTEM_DATABASE_URL == (
+                "postgresql://user:pw@ep-test.us-east-1.aws.neon.tech/eq_aig_dbos_sys?sslmode=require"
+            )
 
-    def test_config_custom_timeout(self):
-        env = {
-            "API_BASE_URL": "https://test.railway.app",
-            "WORKER_API_KEY": "key",
-            "HTTP_TIMEOUT_SECONDS": "5",
-        }
-        with patch.dict(os.environ, env, clear=False):
+    def test_config_defaults_empty_url_for_cold_start_population(self):
+        """DBOS_SYSTEM_DATABASE_URL defaults to empty string so the handler
+        can populate it from Secrets Manager at cold start (see
+        handler._get_config). The handler then calls DBOSClient with the
+        populated value; if the secret fetch fails, that error surfaces
+        from get_dbos_system_database_url(), not from config validation.
+        """
+        with patch.dict(os.environ, {}, clear=True):
             config = LambdaConfig()
-            assert config.HTTP_TIMEOUT_SECONDS == 5
+            assert config.DBOS_SYSTEM_DATABASE_URL == ""
