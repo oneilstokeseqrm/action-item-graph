@@ -47,6 +47,7 @@ from dbos import DBOS
 from action_item_graph.logging import get_logger
 from action_item_graph.models.envelope import EnvelopeV1
 from action_item_graph.workflows._runtime import get_clients
+from deal_graph.clients.event_publisher import publish_deal_processed
 from deal_graph.pipeline.extractor import DealExtractor
 from deal_graph.pipeline.matcher import DealMatcher
 from deal_graph.pipeline.merger import DealMerger
@@ -477,3 +478,52 @@ async def deal_postgres_dual_write_step(
             error_type=type(e).__name__,
         )
         return {'status': 'skipped', 'rows_written': 0, 'error': str(e)}
+
+
+# ---------------------------------------------------------------------------
+# D10 — publish_deal_processed (FAIL-OPEN, side-effect only)
+# ---------------------------------------------------------------------------
+
+
+@DBOS.step(retries_allowed=False)
+async def publish_deal_processed_step(
+    *,
+    tenant_id: str,
+    account_id: str,
+    interaction_id: str,
+    deals_created: list[str],
+    deals_merged: list[str],
+) -> None:
+    """D10: Emit ``deal.processed`` to EventBridge. FAIL-OPEN, no retries.
+
+    Mirrors the D8/D9 (enrich_interaction, postgres_dual_write) pattern:
+    ``retries_allowed=False`` because the underlying helper NEVER raises
+    (broad try/except inside ``publish_deal_processed``). Letting DBOS
+    retry on raise would re-do the whole workflow — much worse than a
+    missing EventBridge event.
+
+    Replay semantics: if the worker crashes between AWS-side acceptance
+    and DBOS step-completion bookkeeping, the workflow resumes on a new
+    worker and this step re-fires. The consumer dedupes via
+    ``analyses.idempotency_key`` UNIQUE on
+    ``f"opp-ingest:{deal_id}:{interaction_id}"``.
+
+    Gated by the ``ENABLE_DEAL_PROCESSED_EVENTS`` env var (checked inside
+    the pure helper). With the flag off this step persists step intent in
+    DBOS but the helper short-circuits to a no-op — observable, harmless.
+
+    boto3 ``put_events`` is synchronous; we offload to a worker thread so
+    the event loop is never blocked on the ~50-200ms AWS round-trip.
+    """
+    import asyncio
+
+    await asyncio.to_thread(
+        publish_deal_processed,
+        tenant_id=tenant_id,
+        account_id=account_id,
+        interaction_id=interaction_id,
+        deals_created=deals_created,
+        deals_merged=deals_merged,
+        source="deal-pipeline",
+        workflow_id=DBOS.workflow_id,
+    )

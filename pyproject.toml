@@ -16,6 +16,7 @@ dependencies = [
     "asyncpg>=0.29.0",
     "dbos>=2.22.0,<3.0",
     "psycopg[binary]>=3.2.0",
+    "boto3>=1.34.0",
 ]
 
 [project.optional-dependencies]
@@ -37,7 +38,6 @@ lambda = [
     # Lambda-dispatcher tests locally with `uv sync --extra lambda`. Without
     # the extra, the Lambda test modules skip via `pytest.importorskip`.
     "aws-lambda-powertools[tracer]>=3.0.0",
-    "boto3>=1.34.0",
     "pydantic-settings>=2.0.0",
 ]
 

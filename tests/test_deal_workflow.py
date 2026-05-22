@@ -62,7 +62,7 @@ def registered_clients():
 
 @pytest.fixture
 def step_mocks():
-    """Patches all 8 @DBOS.step calls inside deal_workflow."""
+    """Patches all 9 @DBOS.step calls inside deal_workflow."""
     mocks = {
         "verify_account_step": AsyncMock(return_value=None),
         "ensure_interaction_step": AsyncMock(
@@ -74,6 +74,7 @@ def step_mocks():
         "match_merge_loop_step": AsyncMock(),
         "enrich_interaction_step": AsyncMock(),
         "deal_postgres_dual_write_step": AsyncMock(),
+        "publish_deal_processed_step": AsyncMock(return_value=None),
     }
     with patch.multiple("deal_graph.workflows.deal_workflow", **mocks):
         yield mocks
@@ -232,6 +233,53 @@ class TestDealWorkflowHappyPath:
         assert step_mocks["match_merge_loop_step"].called
         assert step_mocks["enrich_interaction_step"].called
         assert step_mocks["deal_postgres_dual_write_step"].called
+
+
+# ---------------------------------------------------------------------------
+# Workflow body — D10 publish_deal_processed_step integration
+# ---------------------------------------------------------------------------
+
+
+class TestDealWorkflowPublishStep:
+    """D10: publish_deal_processed_step is called once per successful workflow
+    with the aggregated deals_created/deals_merged lists, and is skipped on the
+    no_deals early-return path. Feature-flag gating lives inside the publisher
+    helper — the step itself always fires at this layer."""
+
+    async def test_publish_step_called_with_aggregated_deals(self, step_mocks):
+        env = _envelope(opportunity_id=TEST_OPPORTUNITY_ID)
+        step_mocks["fetch_existing_deal_step"].return_value = {
+            "opportunity_id": TEST_OPPORTUNITY_ID
+        }
+        step_mocks["deal_extraction_step"].return_value = _populated_extraction_result_dict()
+        merged_id = "019e4124-f840-7bb1-abed-99ee6eebf8ea"
+        step_mocks["match_merge_loop_step"].return_value = {
+            "merge_results": [],
+            "deals_created": [TEST_OPPORTUNITY_ID],
+            "deals_merged": [merged_id],
+            "errors": [],
+        }
+
+        await _workflow_body(env)
+
+        publish = step_mocks["publish_deal_processed_step"]
+        assert publish.call_count == 1
+        kwargs = publish.call_args.kwargs
+        assert kwargs["tenant_id"] == str(TEST_TENANT_ID)
+        assert kwargs["account_id"] == "acct-1"
+        assert kwargs["interaction_id"] == TEST_INTERACTION_ID
+        assert kwargs["deals_created"] == [TEST_OPPORTUNITY_ID]
+        assert kwargs["deals_merged"] == [merged_id]
+
+    async def test_publish_step_not_called_when_no_deals(self, step_mocks):
+        """no_deals early-return path returns before the D10 hook."""
+        env = _envelope()
+        step_mocks["deal_extraction_step"].return_value = _empty_extraction_result_dict()
+
+        result = await _workflow_body(env)
+
+        assert result["status"] == "no_deals"
+        assert not step_mocks["publish_deal_processed_step"].called
 
 
 # ---------------------------------------------------------------------------

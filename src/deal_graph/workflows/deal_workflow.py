@@ -32,6 +32,7 @@ from deal_graph.workflows.deal_steps import (
     fetch_existing_deal_step,
     match_merge_loop_step,
     merge_contacts_to_deal_base_step,
+    publish_deal_processed_step,
     verify_account_step,
 )
 
@@ -142,6 +143,19 @@ async def deal_workflow(envelope_dict: dict[str, Any]) -> dict[str, Any]:
 
     # D9 — postgres_dual_write (fail-open)
     await deal_postgres_dual_write_step(envelope_dict, merge_results_list, interaction_id)
+
+    # D10 — publish deal.processed to EventBridge (fail-open, flag-gated).
+    # Feature-flag gating lives inside the helper (ENABLE_DEAL_PROCESSED_EVENTS).
+    # With the flag off this step persists step intent but the helper short-
+    # circuits to a no-op. Workflow-replay double-publish is absorbed by the
+    # consumer-side analyses.idempotency_key UNIQUE constraint.
+    await publish_deal_processed_step(
+        tenant_id=str(envelope_dict.get('tenant_id', '')),
+        account_id=str(envelope_dict.get('account_id') or ''),
+        interaction_id=interaction_id or '',
+        deals_created=deals_created,
+        deals_merged=deals_merged,
+    )
 
     logger.info(
         'deal_workflow.complete',
