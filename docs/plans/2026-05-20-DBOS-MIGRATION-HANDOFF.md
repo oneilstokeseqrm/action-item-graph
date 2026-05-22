@@ -523,12 +523,124 @@ Phase E /codex review surfaced one non-blocking observation: `test_workflow_exec
 
 ### Cumulative state at end of Phase E
 
-- **Tests:** 649 passing (554 baseline + 95 new in Phase E). All Phase E tests use `pytest.importorskip` where Lambda extras are needed, so default `uv sync && pytest` still works (the Lambda tests skip if extras not installed); `uv sync --extra lambda && pytest` runs the full suite.
+- **Tests:** 649 passing (554 baseline + 95 new in Phase E). All Phase E tests use `pytest.importorskip` where Lambda extras are needed, so default `uv sync && pytest` still works (the Lambda tests skip if extras not installed); `uv sync --extra lambda && pytest` runs the full suite. **NOTE:** This 649 / 554 / 95 framing was over-counted; see "Phase F absorption" section below for the reconciled numbers (567 main baseline → 654 branch HEAD post-Phase-F = +87 net, of which Phase E shipped +71 net not +95).
 - **Pyright CLI:** clean except pre-existing missing-import warnings (boto3 + aws_lambda_powertools — only bundled into the Lambda zip via package_lambda.sh, not in the runtime pyproject.toml).
 - **Branch:** `feat/dbos-migration`, 10 commits ahead of `main` (9 substantive migration + 1 handoff-prep docs).
 - **Pre-existing artifacts in working tree (NOT Phase work, leave alone):** modified `TODOS.md`, untracked `Claude-Context-Limits.txt`, untracked `docs/plans/2026-02-22-event-consumer-implementation.md`.
 - **DLQ message** still parked. Same status as Phase B.
 - **Pattern memory updated:** 8 rules in `pattern_dbos_workflow_parity_rules.md` (Rule 7 from Phase C, Rule 8 from Phase E). New feedback memory `feedback_test_seam_signals.md` codifies the Phase E T25a-scope-down lesson.
+
+### Phase F absorption — /review + /codex full-PR review (committed 2026-05-22)
+
+After Phase E shipped, Phase F executed the structured full-PR review sequence (per the "Picking up from Phase E complete" guide above). The sequence: gstack `/review` skill (single analytical pass) → 2 rounds of full-PR `codex exec` (Round 1 surfaced 2 HIGH; Round 2 returned "0 ship-blocking" stop signal). Four absorption commits landed before /ship.
+
+#### Commit `f9d061e` — Rule 6 extended to topic + deal CREATE paths (/review absorption)
+
+`/review`'s data-migration specialist pass caught three additional Rule 6 gaps that Phase B-2's audit missed:
+
+- `repository.create_topic` — uses `CREATE (t:ActionItemTopic $props)` (NOT MERGE); called from S10b `topic_resolution_persist_step` (`retries_allowed=True, max_attempts=3`). The HANDOFF "Known limitations" §2 mentions `_create_topic_version` (the VERSION snapshot) but NOT `create_topic` itself.
+- `repository.create_topic_version` — uses `CREATE (v:ActionItemTopicVersion {version_id: randomUUID(), ...})`; called from S10b via both `_create_new_topic` AND `_update_topic_summary`.
+- `deal_graph/pipeline/merger._create_new` — generates `opportunity_id = uuid7()`; called from D7 `match_merge_loop_step` (`retries_allowed=False`, but workflow crash-recovery still re-executes the step from scratch).
+
+Audit before committing (per Peter's discipline) confirmed: Owner CREATE in `resolve_or_create_owner` is NOT a Rule 6 hazard (read-then-CREATE inside the same step body provides retry-within-step dedup; HANDOFF §2's "narrow cross-workflow race" framing is correct, leave in §2). Extractor uuid4 sites (`extractor.py:121/201/324`) are NOT reachable from retryable DBOS paths in production topology (Lambda fails-fast on missing envelope.interaction_id; extractor IDs lock to S2 checkpoint).
+
+Fix shape mirrors Phase B-2's `create_version_snapshot` fix: deterministic UUID5 over stable upstream inputs + MERGE on the deterministic key. Tests added: `tests/test_topic_executor_idempotency.py` (new file, 10 tests covering helper determinism + S10b retry equivalence + parity assertions) + `TestDealCreateNewIdempotency` (3 tests in `test_deal_merger.py` covering D7 crash-recovery equivalence + content-hash disambiguation). Bundled mechanical cleanup: hoisted `import uuid as _uuid_module` → top-level `import uuid` in both repositories (one of the maintainability NITs).
+
+#### Commit `f8e282e` — register deal_workflow at workflows package init (/codex Round 1 #1)
+
+**The most important catch of the full-PR review.** 12 prior phase-scoped codex rounds reviewed slices in isolation and missed this; the full-PR pass surfaced it as the first HIGH finding of Round 1.
+
+DBOS registers workflows by name as a side effect of the `@DBOS.workflow()` decorator executing at module import time (`DBOSRegistry.workflow_info_map`, verified at `dbos==2.22.0:_dbos.py:211` per Rule 7). The Lambda dispatcher enqueues both pipelines by literal name:
+
+```
+EnqueueOptions["workflow_name"] = "action_item_workflow" | "deal_workflow"
+```
+
+Production import chain pre-fix:
+```
+api/main.py
+  -> from action_item_graph.workflows import WorkflowClients, register_clients
+    -> action_item_graph/workflows/__init__.py
+      -> action_item_graph.workflows.action_item_workflow   (decorates)
+      -> action_item_graph.workflows.queues                 (no decoration)
+  -> from deal_graph.clients.neo4j_client import DealNeo4jClient   (no decoration)
+```
+
+Nothing in the production chain imported `deal_graph.workflows` or `deal_graph.workflows.deal_workflow`. The decoration on `deal_workflow` never executed. DBOS knew about `action_item_workflow` but NOT `deal_workflow`. Phase 2 deploy would have manifested as: action-item workflows process normally; deal workflows accumulate in the queue with no Railway consumer; Postgres / Neo4j deal writes silently stop.
+
+12 prior codex rounds missed it because each reviewed slices: B-2 confirmed `deal_workflow.py` had correct decoration; C confirmed `handler.py` had correct enqueue call shape; E confirmed tests covered both workflows. Tests passed because `test_deal_workflow.py:26` + `test_concurrent_pipelines.py:42` import `deal_workflow` directly — the TEST process triggered the decoration; production wouldn't have.
+
+Fix: 1-line side-effect import in `src/action_item_graph/workflows/__init__.py` AFTER the existing action-item-graph workflow imports (order matters for circular-import safety per Peter's implementation detail). Regression test in `tests/test_api_main.py::TestDBOSWorkflowRegistration::test_both_workflows_registered_after_production_import_chain` asserts both workflow names appear in `DBOSRegistry.workflow_info_map` post-import — if a future engineer drops the side-effect import, the test fails loudly.
+
+This finding is the strongest empirical evidence for running full-PR codex on top of phase-scoped reviews. **Watchpoint #1 (cross-phase architectural cohesion) was the right framing.** Audit before fixing: `grep -rn "DBOS.workflow"` confirmed only two `@DBOS.workflow()` decorations in the production codebase (`action_item_workflow` + `deal_workflow`); no other hidden workflows.
+
+#### Commit `4b155a2` — scope topic_id to source action item, restore legacy parity (/codex Round 1 #2)
+
+`/codex` Round 1's second HIGH catch: the Rule 6 commit (`f9d061e`) introduced a subtle behavior regression. The deterministic `topic_id` keyed on only `(tenant_id, account_id, canonical_name)` would collapse two same-canonical-name CREATE_NEW resolutions in one batch into one Topic node — but `_create_topic` still ran the full "brand new topic" path for the second one, never calling `increment_topic_action_count` or `_update_topic_summary`.
+
+Pre-Rule-6 (legacy /process behavior):
+```
+Item A: CREATE_NEW canonical "Q1 Expansion" -> uuid4_a -> Topic A
+Item B: CREATE_NEW canonical "Q1 Expansion" -> uuid4_b -> Topic B
+Result: TWO Topic nodes, each with own summary / count / embedding.
+```
+
+Post-Rule-6 (the f9d061e commit):
+```
+Item A: CREATE_NEW canonical "Q1 Expansion" -> topic_id deterministic
+        from (tenant, account, "q1 expansion") -> MERGE creates Topic X
+Item B: CREATE_NEW canonical "Q1 Expansion" -> SAME topic_id
+        -> MERGE finds Topic X (no-op) -> link added but count NOT
+        incremented, summary NOT updated
+Result: ONE Topic node with action_item_count=1, summary reflects A only.
+```
+
+The Rule 6 commit's docstring framed this as "the desired dedup semantic" — overclaim. The Rule 6 commit's job was retry safety WITHOUT changing semantics; the dedup-by-collapse was an unintended side effect. The migration's byte-for-byte parity hard constraint was violated.
+
+Codex tagged this MEDIUM; I escalated to HIGH based on impact analysis. Surfaced to Peter per condition #1. Peter approved Fix A (include `source_action_item_id` in the key) over Fix B (detect MERGE-existing + reroute) for three reasons: hard-constraint compliance + Rule 6 commit's "retry safety without changing semantics" premise + the Rule 6 commit's overclaim docstring needed retraction.
+
+Fix: `_topic_id_for_resolution` accepts a keyword-only `source_action_item_id` and includes it in the UUID5 input. Two retries of the same resolution (same source) → same key → MERGE no-ops (Rule 6 retry safety preserved). Two batch-mate action items with same canonical_name → different source IDs → different topic_ids → distinct Topic nodes (legacy parity restored).
+
+Tests updated: helper-determinism test suite (7 tests) accepts the new kwarg; new test `test_create_topic_same_canonical_name_different_source_produces_distinct_topics` pins the legacy-parity invariant. Same test would have caught the f9d061e regression pre-ship if it had existed.
+
+#### Commit `b7477ff` — drop dead secret_arn back-compat block (/codex Round 2)
+
+`/codex` Round 2 surfaced a LOW comment-vs-code discrepancy in `infra/__main__.py`. Phase C (`3ca3b1e`) removed `worker-api-key` from the secrets dict, which made the back-compat-guarded `if _worker_api_key_arn is not None: pulumi.export("secret_arn", ...)` block a silent no-op. The comment claimed back-compat preservation; the code emitted nothing. Surfaced to Peter per "surface after Round 2 regardless of findings" instruction.
+
+Per Peter's grep-first discipline: audited in-repo refs (only `infra/`'s own files), `.github/workflows/deploy-lambda.yml` (uses unrelated GHA secrets — `secrets.AWS_DEPLOY_ROLE_ARN` + `secrets.PULUMI_ACCESS_TOKEN`), `scripts/` (no `pulumi stack output` invocations), cross-repo sibling EQ-CORE projects (zero hits via `grep -rln "action-item-graph.*secret_arn"`). Confirmed zero external consumers — safe to drop the dead block.
+
+Fix: removed the 8-line block + replaced surrounding comment with honest post-Phase-C reality (pointer to explicit `<key>_secret_arn` exports for future consumers). NO TESTS — Pulumi exports aren't unit-testable without running `pulumi up`; T29 deploy verifies the actual stack output shape.
+
+#### Deliberate non-action with reasoning — Codex R2 Finding A (MEDIUM)
+
+`/codex` Round 2 also surfaced a finding I'd otherwise have absorbed: deal `_create_new`'s deterministic `opportunity_id` (keyed on `tenant + interaction + content_hash`) would collapse byte-identical extracted deals from the same envelope into one Deal node, where legacy `uuid7()` would have produced two duplicates. Surfaced to Peter per condition #1 — and Peter approved **deliberate non-action**, NOT a fix. Reasoning preserved verbatim because the topic-vs-deal symmetry can mislead future readers:
+
+**The topic case (Round 1 Finding #2) and the deal case (Round 2 Finding A) look symmetric on paper but differ in critical ways:**
+
+| | Topic (Round 1) | Deal (Round 2) |
+|---|---|---|
+| Trigger scenario | Two DISTINCT action items extract topics with same canonical_name | Same envelope produces two BYTE-IDENTICAL extracted deals |
+| Legacy semantic | Two distinct entities → two distinct Topic nodes (correct per-source dedup) | One logical deal extracted twice → two duplicate Deal nodes (arguably a legacy bug) |
+| Collapse behavior | Loses information (count, summary) — real regression | Reduces duplicates — arguably an improvement |
+| Practical defense | None at executor layer (LINK_EXISTING vs CREATE_NEW already decided in S10a) | D7's matcher catches it in 99%+ of real flows: iteration 2's matcher finds iteration 1's Deal → routes to `_merge_existing` not `_create_new` |
+| LLM behavior | Two action items reasonably share topic names | Two byte-identical extracted deals = LLM hallucinated a duplicate (anomalous) |
+
+The "byte-for-byte parity" hard constraint protects the shape of external contracts, not legacy bugs in their exact form. The topic case had legacy correct + new code regressed (worth fixing — `4b155a2` fixed it). The deal case has legacy buggy + new code happens to fix the bug (improvement, not regression). Three layers of plumbing (D7 → merge_deal → _create_new) to preserve duplicate-creation in an anomalous case the matcher catches 99%+ of the time is poor ROI.
+
+If the deal pipeline later starts showing concerning behavior under DBOS crash-recovery (operationally annoying duplicate-deal symptoms surface), revisit by threading a per-extraction sequence number through the D7 loop. The fix shape is straightforward; deferring is the right call until evidence demands it.
+
+#### Phase F closing verdict
+
+**Codex Round 2 explicit verdict: "0 ship-blocking findings; 2 non-blocking."** Severity dropped HIGH → MEDIUM/LOW between rounds, matching the documented stop-signal discipline (HIGH severity sustained → keep iterating; severity drop + 0 ship-blocking → stop). Round 3+ NOT invoked per Peter's reinforcement #2 ("codex round counts are evidence, not budget").
+
+3 HIGH surfaces to Peter throughout Phase F, all approved + absorbed. 0 MEDIUM/LOW surfaces (those absorbed autonomously per the discipline) except the deal opportunity_id MEDIUM which was surfaced because it crossed the topic-vs-deal-symmetry threshold worth Peter's judgment call.
+
+**Cumulative state at end of Phase F:**
+
+- **Branch:** `feat/dbos-migration`, 14 commits ahead of `main` (10 substantive Phase A-E + 1 handoff-prep docs + 4 Phase F absorption: f9d061e + f8e282e + 4b155a2 + b7477ff + the brief synthesis commit).
+- **Tests:** 654 passing (reconciled vs main baseline 567 = +87 net). The earlier 649/554/95 framing was over-counted (Phase E shipped +71 net not +95; main baseline was 567 not 554). Confirm at /ship time via `git checkout main && uv run pytest --collect-only -q` (567) + `git checkout feat/dbos-migration && uv run pytest --collect-only -q` (654).
+- **Phase F pre-PR brief:** `docs/plans/2026-05-21-PHASE-F-PRE-PR-BRIEF.md` is the synthesized artifact (was skeleton at Phase E close; now filled in with all findings categorized, draft PR title + body, watchpoint observations).
+- **Pattern memory unchanged in Phase F:** the 8 rules still cover the absorbed findings; no Rule 9 earned (the Phase F gaps were repeat applications of Rule 6 + a cross-phase-cohesion concern that doesn't generalize to a numbered rule).
 
 ---
 
