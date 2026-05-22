@@ -223,11 +223,148 @@ The 2-week rollback window starts when Phase 2 deploys (T29). Phase 3 (T31 — d
 
 ---
 
-## Picking up from Phase E complete — Phase F /review + /codex + /ship guide
+## Picking up from /ship complete — T29 deploy + T30 DLQ replay guide
 
-**This is the CURRENT entry point for the next agent.** Phases A + B-1 + B-2 + C + E are shipped on `feat/dbos-migration` (10 commits ahead of `main` (9 substantive migration + 1 handoff-prep docs); see TL;DR for the full commit log). Phase E /codex review (Phase-E-only scope) returned an explicit "No high-severity ship blockers" verdict, with one non-blocking observation absorbed via a test rename (commit `75ca5f2`).
+**This is the CURRENT entry point for the next agent.** PR #14 (https://github.com/oneilstokeseqrm/action-item-graph/pull/14) is **MERGED to main** at v0.3.0 (merge commit `89351a3`, 2026-05-22). All Phase F absorption work shipped. The remaining work is the operational deploy + post-deploy live integration test.
 
-Phase F is the **full-PR review + ship sequence**: run `/review` skill, then `/codex review` on the full 9-commit branch (3-5 rounds expected — see iteration ceiling below), then synthesize a structured pre-PR brief, then surface to Peter at the `/ship` gate. **Phase D (retire `/process`)** is intentionally deferred to a separate PR Day 14+ post-Phase 2 deploy per the locked 3-phase migration; do NOT bundle it into this PR.
+The migration has been BUILT but not yet DEPLOYED. The Lambda code on `main` still expects `DBOS_SYSTEM_DATABASE_URL` (set by Pulumi to the Neon direct-connection string). That secret has NOT been set in Pulumi config yet — T29 is the manual step that does so. Until T29 happens, the deploy infrastructure is in a half-state: code is on main, Pulumi config is incomplete, Lambda code that would deploy via the auto-deploy workflow can't (and the workflow is currently broken anyway — see Step 0 below).
+
+### Step 0 — Critical pre-context (broken CI)
+
+The repo has ONE GitHub Actions workflow: `.github/workflows/deploy-lambda.yml`. It triggers on push-to-main when `src/action_item_graph/lambda_ingest/**`, `scripts/package_lambda.sh`, or `infra/**` change. PR #14's merge commit triggered it, and it failed at the "Configure AWS credentials (OIDC)" step — same failure mode as the prior PR #10 merge from 2026-03-20.
+
+**Root cause:** the `AWS_DEPLOY_ROLE_ARN` GitHub Actions secret is either missing OR the OIDC trust policy on the IAM role doesn't allow this repo. **This is a pre-existing CI infrastructure issue, NOT caused by the DBOS migration.** The workflow has been inert for ~2 months.
+
+**Implication for T29 deploy:** the auto-deploy workflow cannot be relied on. The deploy will be **manual `pulumi up --stack prod`** from Peter's local machine (or wherever Pulumi is configured + AWS credentials are available). This is actually preferable for the first-ever DBOS deploy because:
+- The phased migration plan calls for human supervision between Phase 1 and Phase 2 (readiness gate)
+- Manual deploy lets the operator observe `pulumi up` output for unexpected resource changes
+- The OIDC CI can be fixed as a separate P3 cleanup (~30 min: configure IAM trust policy + set `AWS_DEPLOY_ROLE_ARN` GHA secret) but doesn't block the migration
+
+### Step 1 — Orient (10 min, mandatory reading)
+
+In this exact order:
+
+1. **This doc, the "Picking up from /ship complete" section** (you're in it). Especially Step 0 above (broken CI), the locked 3-phase migration sequence, the T29 secret-handoff protocol (Step 2 below), and the T30 DLQ replay protocol (Step 4 below).
+
+2. **`docs/plans/2026-05-22-T29-T30-DEPLOY-BRIEF.md`** — pre-populated deploy brief with the Pulumi commands, monitoring queries, expected outputs, and an empty "Deploy observations" section ready to fill during/after the deploy. This is the artifact to update as the deploy progresses.
+
+3. **`docs/plans/2026-05-21-PHASE-F-PRE-PR-BRIEF.md`** — historical reference for the migration's pre-merge state. The merge SHA (`89351a3`) and the merged-PR test count (654) are documented here.
+
+4. **Memory entries** at `~/.claude/projects/-Users-peteroneil-EQ-CORE-action-item-graph/memory/`:
+   - `feedback_secret_handoff_pattern.md` — hostname + endpoint ID + role only when surfacing credentials, NEVER password literals. Peter retrieves the password directly from Neon.
+   - `reference_neon_dbos_state_dbs.md` — confirms `eq_aig_dbos_sys` lives in `super-glitter-11265514` (eq-dev) Neon project. Direct (non-pooler) connection REQUIRED.
+   - `feedback_autonomous_execution.md` — execute autonomously after plan approval; T29 requires Peter for the manual secret-set step.
+   - `project_dbos_migration_trajectory.md` — reflects merged + deploying state.
+
+### Step 2 — T29 secret handoff protocol (Peter manual)
+
+The Pulumi `prod` stack config requires `dbos-system-database-url` to be set BEFORE `pulumi up` can succeed. Without it, `infra/__main__.py:23` `config.require_secret("dbos-system-database-url")` raises.
+
+**Peter sets the secret** (from his vault, NEVER echo the password in conversation per `feedback_secret_handoff_pattern.md`):
+
+```bash
+cd infra
+pulumi config set --secret dbos-system-database-url \
+  "postgresql://neondb_owner:<PASSWORD_FROM_VAULT>@ep-silent-waterfall-adtinpn1.c-2.us-east-1.aws.neon.tech/eq_aig_dbos_sys?sslmode=require"
+```
+
+The hostname MUST be `ep-silent-waterfall-adtinpn1.c-2.us-east-1.aws.neon.tech` (direct, non-pooler). The pooled endpoint `ep-silent-waterfall-adtinpn1-pooler.c-2.us-east-1.aws.neon.tech` breaks DBOS because PgBouncer's transaction-mode pooling drops the advisory locks DBOS uses for workflow coordination. The role is `neondb_owner`. Database name is `eq_aig_dbos_sys`.
+
+**Peter also sets the Railway env var:**
+
+In Railway dashboard for the `action-item-graph` service, add env var `DBOS_SYSTEM_DATABASE_URL` with the same direct-connection URL. Restart the Railway service to pick it up. The FastAPI app's lifespan at `src/action_item_graph/dbos_runtime.py:54` will fail-fast at cold start if this env var is unset.
+
+### Step 3 — Phase 1 + Phase 2 deploy sequence
+
+Once T29 secret is set in both Pulumi and Railway, deploy in this order (per the locked 3-phase migration):
+
+**Phase 1 — DBOS infrastructure (~5 min):**
+
+```bash
+cd infra
+pulumi preview --stack prod   # Confirm only the new Secrets Manager entry + IAM policy expansion show as changes
+pulumi up --stack prod        # Apply
+```
+
+Expected changes: new `aws.secretsmanager.Secret` for `dbos-system-database-url`, new `aws.secretsmanager.SecretVersion`, expanded IAM policy on the Lambda execution role granting read access to the new secret. NO Lambda code changes yet (the Lambda zip needs `scripts/package_lambda.sh` to rebuild + Pulumi to upload the new zip — but `pulumi up` does that automatically when the zip checksum changes).
+
+WAIT — actually `pulumi up` WILL also deploy the new Lambda code from the rebuilt zip if `scripts/package_lambda.sh` runs first. So the staged Phase 1 (infra only) vs Phase 2 (Lambda code shift) separation requires either:
+- A `--target` filter on the Pulumi resources to apply Phase 1 only
+- OR running `pulumi up` once with both Phase 1 and Phase 2 changes (which is what actually happens in practice; the "phases" are conceptual)
+
+**Readiness gate before Phase 2:** before letting traffic flow through the new Lambda, verify DBOS workers are healthy on Railway:
+
+```bash
+# Connect to eq_aig_dbos_sys via psql or use mcp__neon__run_sql
+SELECT COUNT(*) FROM dbos.workflow_status;   # Should return 0 (no workflows yet) or N if recovery already kicked in
+SELECT current_database(), current_schema();  # Confirm you're on eq_aig_dbos_sys
+```
+
+If the Railway service logs show "DBOS launched" at startup, the DBOS runtime is ready.
+
+**Phase 2 — Lambda traffic shift (automatic if Phase 1 was the `pulumi up`):**
+
+Once Phase 1's `pulumi up` deploys the new Lambda zip, Lambda invocations from SQS will use the new `DBOSClient.enqueue` path. Watch:
+- CloudWatch logs for the Lambda function — should see `record.enqueued` log lines for each envelope
+- DBOS dashboard / Neon SQL for new `workflow_status` rows
+- CloudWatch metric `ActionItemGraph/Lambda/partial_enqueue_pair_count` should stay at 0 (alarm if >0)
+
+### Step 4 — T30 DLQ replay (post-deploy live integration test)
+
+Once Phase 1+2 are deployed and the first ~10 envelopes process cleanly through the new DBOS path, redrive the parked DLQ message:
+
+```bash
+aws sqs start-message-move-task \
+  --source-arn arn:aws:sqs:us-east-1:<ACCOUNT_ID>:action-item-graph-dlq \
+  --destination-arn arn:aws:sqs:us-east-1:<ACCOUNT_ID>:action-item-graph-queue
+```
+
+Then verify the message processes:
+- CloudWatch logs: Lambda receives the message, enqueues both workflows
+- DBOS state DB: two new `workflow_status` rows for `action-item-graph:action-item:interaction-<uuid>` and `action-item-graph:deal:interaction-<uuid>`
+- Neo4j: action_items + deals appear for the Anthropic security-questionnaire content (~5,500 words — the content that triggered the original 120s Lambda timeout)
+- Postgres `action_items` table: dual-write rows present
+
+**Expected outcome:** the message that previously exhausted Lambda's 120s timeout now succeeds via DBOS workflow's 15-minute timeout + checkpointed per-step retry. **This is the live proof that the migration solved the originating problem.**
+
+The DLQ message MessageId is `58863f20-3cda-48f7-973d-3002aa31331b` (Anthropic security questionnaire, 2026-05-19).
+
+### Step 5 — Monitor 14-day window before Phase D
+
+After T30 succeeds:
+- Watch `partial_enqueue_pair_count` CloudWatch metric: should stay at 0 in steady-state
+- Watch DBOS `workflow_status` table: failed workflows visible with full input/output
+- Watch the HANDOFF §2 known-limits (version counter drift, Owner narrow race, S9a/S10a asymmetry) for signs they surface in production
+
+After 14 days with no incidents, open Phase D PR: retire `/process` HTTP route + `dispatcher.py` + cleanup `Pulumi.prod.yaml` config entries. See deletion-seam list in PR #14 body + v0.3.0 CHANGELOG.
+
+### Step 6 — Rollback procedure (if Phase 2 surfaces issues)
+
+If post-deploy monitoring shows the new path is broken:
+
+1. **Pause SQS event source mapping** (~30s via AWS console or Pulumi flag) to stop new envelopes entering the new Lambda code path
+2. **Redeploy old Lambda code** (`git revert <merge-commit-sha>` on main, `pulumi up --stack prod`, ~5 min) OR direct AWS Lambda console upload of previous version
+3. **Resume SQS event source mapping** — Lambda now uses old `submit_to_railway` path; `/process` is still alive (Phase D not yet shipped), so messages flow normally
+4. **In-flight DBOS workflows complete naturally** on Railway. They're idempotent at the Neo4j MERGE / Postgres ON CONFLICT layer. New envelopes won't trigger new DBOS workflows (Lambda now goes to old path), so the queue drains.
+
+Realistic end-to-end recovery time: ~12 minutes (Lambda redeploy ~2 min + in-flight workflow drain ~10 min). Stops new traffic in ~2 min.
+
+### Step 7 — Hard constraints (DO NOT VIOLATE)
+
+- **DO NOT** set the dbos-system-database-url Pulumi config without verifying the URL is the DIRECT (non-pooler) endpoint. Pooled endpoint breaks DBOS advisory locks.
+- **DO NOT** echo password literals in conversation. Vault → Pulumi config → never displayed.
+- **DO NOT** skip the readiness gate between Phase 1 and Phase 2. DBOS workers must be confirmed healthy before Lambda traffic shifts.
+- **DO NOT** redrive the DLQ message until Phase 1+2 are confirmed working (first ~10 envelopes processed cleanly). The DLQ message is the LIVE INTEGRATION TEST — don't burn it on a half-deployed system.
+- **DO NOT** bundle Phase D into the T29/T30 work. Phase D is Day 14+ as a separate PR.
+- **DO NOT** delete the GitHub Actions deploy-lambda.yml workflow even though it's broken. Fix the OIDC trust as a separate P3 task; the workflow file itself is the contract for future automated deploys once OIDC is fixed.
+
+---
+
+## Picking up from Phase E complete — Phase F /review + /codex + /ship guide (HISTORICAL)
+
+**(Historical — Phase F entry point, kept for trajectory record. The current entry point is Step 0+ above ("Picking up from /ship complete — T29 deploy + T30 DLQ replay guide").)** Phases A + B-1 + B-2 + C + E are shipped on `feat/dbos-migration` (10 commits ahead of `main` (9 substantive migration + 1 handoff-prep docs); see TL;DR for the full commit log). Phase E /codex review (Phase-E-only scope) returned an explicit "No high-severity ship blockers" verdict, with one non-blocking observation absorbed via a test rename (commit `75ca5f2`).
+
+Phase F was the **full-PR review + ship sequence**: ran `/review` skill, then `/codex review` on the full 9-commit branch (2 rounds, stopped at explicit "0 ship-blocking findings"), synthesized a structured pre-PR brief, surfaced to Peter at the `/ship` gate. **Phase D (retire `/process`)** intentionally deferred to a separate PR Day 14+ post-Phase 2 deploy per the locked 3-phase migration.
 
 ### Step 1 — Orient (15 min, mandatory reading)
 
