@@ -3,3 +3,5 @@ config:
   action-item-graph-infra:api-base-url: https://api-production-c33a.up.railway.app
   action-item-graph-infra:worker-api-key:
     secure: AAABAJyya3qCO5yaKyYaIeCdyUusYZtzbw9vkRAMiDHvgitmeVX82cjrKziNlyYkp6BObtuBsr3PdUyEoHG+7eQS//uqOHZR9QiojPNLmdVf+SqYG1Offm0KXVCd+l7U
+  action-item-graph-infra:dbos-system-database-url:
+    secure: AAABANuu/GlZ/HByztCB7z3OQfnD8GleJ6pdIQ33+gdVyhQ8uEH3fCLST58lMKMCENBkBB4nzsoxQ4P/g1UWOgErU+udUNgYc/ZQEkXSgdoqPRIdiGvk3Djr3QgDGzT+Z1JJGl4waKhezlZ8EbQ6ddfX9PlQgNPwAW+d1yFyZEtSvSUNgVexC6TUv6/gGA8WIbGAhUEFuVERycTKHcV0UPhk0b/oSszzrlxcFD2ZKTO8lJw2qeMGY5q+jw==

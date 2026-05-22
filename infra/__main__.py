@@ -23,10 +23,26 @@ config = pulumi.Config()
 dbos_system_database_url = config.require_secret("dbos-system-database-url")
 
 # Phase C cutover (2026-05-21): the Lambda dispatcher no longer POSTs to
-# Railway /process; it enqueues directly via DBOSClient. The `worker-api-key`
-# and `api-base-url` Pulumi.prod.yaml config entries are still present in
-# the encrypted stack config but the forwarder no longer reads them —
-# Phase D removes the Pulumi.prod.yaml entries in a follow-up PR.
+# Railway /process; it enqueues directly via DBOSClient. The new Lambda
+# code does NOT read worker-api-key.
+#
+# However, the worker-api-key AWS Secrets Manager resource is kept alive
+# during the migration window for rollback safety. If we ever revert the
+# DBOS migration (HANDOFF.md Step 6), the restored old Lambda code reads
+# this secret to authenticate POSTs to Railway's /process. Letting Pulumi
+# garbage-collect it now would force a re-create on rollback, with a new
+# AWS ARN and a brief window where the recreated Secret's value must match
+# Railway's WORKER_API_KEY env var byte-for-byte. We keep the resource
+# alive end-to-end instead.
+#
+# Phase D follow-up PR (Day 14+ post-deploy) retires this entry alongside
+# /process route deletion and the Pulumi.prod.yaml worker-api-key +
+# api-base-url config cleanup. Per the deploy brief
+# (docs/plans/2026-05-22-T29-T30-DEPLOY-BRIEF.md § "Day 14+ follow-up"):
+# "Pulumi.prod.yaml worker-api-key config entry (kept for back-compat
+# during the window; remove in Phase D)" — this explicit keep-alive
+# honors that intent at the resource level too.
+worker_api_key = config.require_secret("worker-api-key")
 
 # ── Create the Forwarder Stack ──
 outputs = create_forwarder_stack(
@@ -49,6 +65,8 @@ outputs = create_forwarder_stack(
     },
     secrets={
         "dbos-system-database-url": dbos_system_database_url,
+        # Migration-window keep-alive; see comment above. Retire in Phase D.
+        "worker-api-key": worker_api_key,
     },
     rule_description="Routes transcript and email events to action-item-graph SQS queue",
     # Defaults match live config: 720s visibility, 3 max receives, 256MB, 120s timeout
@@ -72,13 +90,12 @@ pulumi.export("rule_arn", outputs.rule_arn)
 for secret_key, secret_arn in outputs.secret_arns_by_name.items():
     pulumi.export(f"{secret_key}_secret_arn", secret_arn)
 
-# The historical ``secret_arn`` export (single-secret alias that meant
-# the worker-api-key ARN pre-migration) was removed in this PR. Phase C
-# dropped ``worker-api-key`` from the secrets dict, which made the
-# back-compat-guarded ``pulumi.export("secret_arn", ...)`` block a no-op
-# — the comment claimed back-compat preservation but the code emitted
-# nothing. Phase F /codex Round 2 caught the discrepancy. Grep audit
-# (CI workflow, scripts/, sibling EQ-CORE repos) found zero consumers
-# of the legacy ``secret_arn`` Pulumi output, so dropping the dead
-# block is safe. Future consumers should use the explicit
-# ``<key>_secret_arn`` exports above.
+# The historical ``secret_arn`` export (single-secret positional alias
+# that meant the worker-api-key ARN pre-migration) was removed in PR #14
+# alongside the broader Phase F /codex Round 2 cleanup. Per-secret named
+# exports via the for-loop above are now the convention: worker-api-key's
+# ARN is exported as ``worker-api-key_secret_arn``, alongside
+# ``dbos-system-database-url_secret_arn``. Grep audit (CI workflow,
+# scripts/, sibling EQ-CORE repos) confirmed zero consumers of the
+# legacy ``secret_arn`` positional alias. Future consumers should use
+# the explicit ``<key>_secret_arn`` exports above.
