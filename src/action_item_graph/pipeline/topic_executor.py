@@ -31,25 +31,36 @@ def _topic_id_for_resolution(
     tenant_id: UUID,
     account_id: str,
     canonical_name: str,
+    *,
+    source_action_item_id: str,
 ) -> UUID:
     """Derive a deterministic ActionItemTopic ID for retry-safe MERGE.
 
     S10b (``topic_resolution_persist_step``) is
     ``retries_allowed=True``; the prior ``uuid4()`` generation would
     create a duplicate ActionItemTopic node on every retry. UUID5 over
-    ``(tenant_id, account_id, canonical_name)`` is stable across retries
-    so the repository MERGE no-ops on the second call. Per
-    ``memory/pattern_dbos_workflow_parity_rules.md`` Rule 6.
+    ``(tenant_id, account_id, canonical_name, source_action_item_id)``
+    is stable across retries so the repository MERGE no-ops on the
+    second call — preserving Rule 6 idempotency.
 
-    Two action items in the same batch with the same canonical_name
-    collapse to one Topic. That's the desired dedup semantic; the prior
-    ``uuid4()`` behavior was an accidental fan-out the resolver couldn't
-    catch (S10a queries Neo4j for candidates, but new-in-this-batch
-    topics aren't yet in Neo4j).
+    Including ``source_action_item_id`` in the key is the load-bearing
+    parity choice: two action items in the same batch that both resolve
+    to ``CREATE_NEW`` with the same canonical_name produce DISTINCT
+    topic_ids (and thus distinct Topic nodes). This matches the legacy
+    /process behavior where each call generated a fresh ``uuid4()``.
+    Codex R1 caught that an earlier version of this helper (keyed only
+    on tenant + account + canonical_name) collapsed those two
+    resolutions into one Topic with under-counted action_item_count and
+    a summary reflecting only the first item — a real external-contract
+    drift from legacy.
+
+    Per ``memory/pattern_dbos_workflow_parity_rules.md`` Rule 6. Phase F
+    /codex Round 1 absorption.
     """
     return uuid5(
         NAMESPACE_URL,
-        f'aig-topic:{tenant_id}:{account_id}:{canonical_name}',
+        f'aig-topic:{tenant_id}:{account_id}:'
+        f'{canonical_name}:{source_action_item_id}',
     )
 
 
@@ -217,11 +228,21 @@ class TopicExecutor:
 
         # Create the ActionItemTopic model.
         # ``id`` is deterministic per ``(tenant_id, account_id,
-        # canonical_name)`` so S10b retries converge to the same Topic
-        # node via MERGE in ``repository.create_topic`` (Rule 6).
+        # canonical_name, source_action_item_id)`` so S10b retries
+        # converge to the same Topic node via MERGE in
+        # ``repository.create_topic`` (Rule 6). Including the source
+        # action_item_id in the key preserves legacy parity — two
+        # batch-mate action items with the same canonical_name still
+        # produce two distinct Topic nodes, matching the prior
+        # ``uuid4()`` behavior at the entity level. Codex R1 absorption.
         canonical_name = ActionItemTopic.canonicalize_name(extracted.name)
         topic = ActionItemTopic(
-            id=_topic_id_for_resolution(tenant_id, account_id, canonical_name),
+            id=_topic_id_for_resolution(
+                tenant_id,
+                account_id,
+                canonical_name,
+                source_action_item_id=resolution.action_item_id,
+            ),
             tenant_id=tenant_id,
             account_id=account_id,
             name=extracted.name,

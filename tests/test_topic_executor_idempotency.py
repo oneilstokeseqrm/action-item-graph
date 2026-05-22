@@ -52,28 +52,73 @@ ACTION_ITEM_ID = '22222222-2222-4222-8222-222222222222'
 
 
 class TestTopicIdHelperDeterminism:
-    """Direct unit tests for the deterministic ID helpers."""
+    """Direct unit tests for the deterministic ID helpers.
+
+    The topic_id key includes ``source_action_item_id`` per Codex R1
+    absorption. This preserves Rule 6 retry safety (same resolution
+    retries → same topic_id) AND legacy parity (two batch-mate action
+    items with the same canonical_name → two distinct Topic nodes,
+    matching the prior ``uuid4()`` per-call behavior).
+    """
 
     def test_topic_id_same_inputs_produce_same_id(self):
-        a = _topic_id_for_resolution(TENANT_ID, ACCOUNT_ID, 'q1 sales expansion')
-        b = _topic_id_for_resolution(TENANT_ID, ACCOUNT_ID, 'q1 sales expansion')
+        """Rule 6: retries of the same resolution converge to the same topic_id."""
+        a = _topic_id_for_resolution(
+            TENANT_ID, ACCOUNT_ID, 'q1 sales expansion',
+            source_action_item_id=ACTION_ITEM_ID,
+        )
+        b = _topic_id_for_resolution(
+            TENANT_ID, ACCOUNT_ID, 'q1 sales expansion',
+            source_action_item_id=ACTION_ITEM_ID,
+        )
         assert a == b
         assert a.version == 5
 
+    def test_topic_id_same_canonical_name_different_source_produces_different_id(self):
+        """Legacy parity: two action items in one batch with the same
+        canonical_name produce DISTINCT Topic nodes (not collapsed)."""
+        a = _topic_id_for_resolution(
+            TENANT_ID, ACCOUNT_ID, 'q1 sales expansion',
+            source_action_item_id=ACTION_ITEM_ID,
+        )
+        b = _topic_id_for_resolution(
+            TENANT_ID, ACCOUNT_ID, 'q1 sales expansion',
+            source_action_item_id='99999999-9999-4999-8999-999999999999',
+        )
+        assert a != b
+
     def test_topic_id_different_canonical_name_produces_different_id(self):
-        a = _topic_id_for_resolution(TENANT_ID, ACCOUNT_ID, 'q1 sales expansion')
-        b = _topic_id_for_resolution(TENANT_ID, ACCOUNT_ID, 'q2 sales expansion')
+        a = _topic_id_for_resolution(
+            TENANT_ID, ACCOUNT_ID, 'q1 sales expansion',
+            source_action_item_id=ACTION_ITEM_ID,
+        )
+        b = _topic_id_for_resolution(
+            TENANT_ID, ACCOUNT_ID, 'q2 sales expansion',
+            source_action_item_id=ACTION_ITEM_ID,
+        )
         assert a != b
 
     def test_topic_id_different_account_produces_different_id(self):
-        a = _topic_id_for_resolution(TENANT_ID, 'acct-lightbox', 'shared name')
-        b = _topic_id_for_resolution(TENANT_ID, 'acct-other', 'shared name')
+        a = _topic_id_for_resolution(
+            TENANT_ID, 'acct-lightbox', 'shared name',
+            source_action_item_id=ACTION_ITEM_ID,
+        )
+        b = _topic_id_for_resolution(
+            TENANT_ID, 'acct-other', 'shared name',
+            source_action_item_id=ACTION_ITEM_ID,
+        )
         assert a != b
 
     def test_topic_id_different_tenant_produces_different_id(self):
         other_tenant = UUID('33333333-3333-4333-8333-333333333333')
-        a = _topic_id_for_resolution(TENANT_ID, ACCOUNT_ID, 'topic name')
-        b = _topic_id_for_resolution(other_tenant, ACCOUNT_ID, 'topic name')
+        a = _topic_id_for_resolution(
+            TENANT_ID, ACCOUNT_ID, 'topic name',
+            source_action_item_id=ACTION_ITEM_ID,
+        )
+        b = _topic_id_for_resolution(
+            other_tenant, ACCOUNT_ID, 'topic name',
+            source_action_item_id=ACTION_ITEM_ID,
+        )
         assert a != b
 
     def test_topic_version_id_same_inputs_produce_same_id(self):
@@ -194,11 +239,12 @@ class TestCreateTopicIdempotency:
         assert version_call_1 == version_call_2
 
     @pytest.mark.asyncio
-    async def test_create_topic_id_uses_canonical_name_not_raw_name(
+    async def test_create_topic_id_derives_from_canonical_name_and_source(
         self, executor, mock_repository, create_resolution,
     ):
-        """The MERGE key is derived from the canonicalized topic name so two
-        case-variant extractions ('Q1 sales' vs 'q1 sales') collapse."""
+        """The MERGE key is derived from (tenant, account, canonical_name,
+        source_action_item_id) — verifying topic.id matches the helper's
+        output applied to the same inputs."""
         await executor._create_topic(
             resolution=create_resolution,
             tenant_id=TENANT_ID,
@@ -209,11 +255,65 @@ class TestCreateTopicIdempotency:
         topic_a = mock_repository.create_topic.call_args.args[0]
 
         # Predict the expected topic_id from the helper applied to the
-        # canonical name (case-folded, etc.).
+        # canonical name (case-folded) AND the resolution's source
+        # action_item_id. Including source in the key preserves legacy
+        # parity (Codex R1 absorption).
         expected = _topic_id_for_resolution(
-            TENANT_ID, ACCOUNT_ID, topic_a.canonical_name
+            TENANT_ID, ACCOUNT_ID, topic_a.canonical_name,
+            source_action_item_id=create_resolution.action_item_id,
         )
         assert topic_a.id == expected
+
+    @pytest.mark.asyncio
+    async def test_create_topic_same_canonical_name_different_source_produces_distinct_topics(
+        self, executor, mock_repository, create_resolution,
+    ):
+        """Legacy parity: two action items in the same batch that both
+        resolve to CREATE_NEW with the same canonical_name produce two
+        DISTINCT Topic nodes. The prior /process path generated a fresh
+        uuid4 per call; the new deterministic-key path must preserve
+        that fan-out at the entity level. Codex R1 absorption."""
+        # Resolution A — first action item.
+        await executor._create_topic(
+            resolution=create_resolution,
+            tenant_id=TENANT_ID,
+            account_id=ACCOUNT_ID,
+            action_item_text='Prepare Q1 review deck',
+            owner='Peter',
+        )
+        topic_a = mock_repository.create_topic.call_args.args[0]
+
+        mock_repository.create_topic.reset_mock()
+        mock_repository.create_topic_version.reset_mock()
+        mock_repository.link_action_item_to_topic.reset_mock()
+
+        # Resolution B — different action item, same canonical_name (the
+        # extractor's identical name + S10a's CREATE_NEW decision twice).
+        resolution_b = TopicResolutionResult(
+            action_item_id='99999999-9999-4999-8999-999999999999',
+            action_item_summary=create_resolution.action_item_summary,
+            extracted_topic=create_resolution.extracted_topic,
+            decision=create_resolution.decision,
+            topic_id=None,
+            confidence=create_resolution.confidence,
+            embedding=create_resolution.embedding,
+            candidates=create_resolution.candidates,
+        )
+        await executor._create_topic(
+            resolution=resolution_b,
+            tenant_id=TENANT_ID,
+            account_id=ACCOUNT_ID,
+            action_item_text='Another Q1 prep task',
+            owner='Sarah',
+        )
+        topic_b = mock_repository.create_topic.call_args.args[0]
+
+        # Same canonical_name, but DIFFERENT topic_ids — preserves the
+        # legacy two-Topic-nodes-per-batch behavior. Without the source
+        # in the key, these would collapse to one node with
+        # under-counted action_item_count.
+        assert topic_a.canonical_name == topic_b.canonical_name
+        assert topic_a.id != topic_b.id
 
 
 class TestUpdateTopicSummaryIdempotency:
