@@ -16,6 +16,8 @@
 
 A 2026-05-19 Lambda timeout incident (Anthropic security questionnaire ~5,500 words exceeded the 120s Lambda timeout) surfaced an architectural mismatch: an LLM-heavy 10-stage pipeline running synchronously inside a Lambda function with a hard 120s ceiling. The bandaid fix (raise Lambda timeout) was rejected by Peter in favor of a structural fix: migrate to a DBOS-orchestrated durable workflow that runs the pipeline asynchronously on Railway, with per-step retry, checkpointing, and observability.
 
+**Status as of 2026-05-22 (Phase 1 CLOSED):** PR #14 merged to main (`89351a3`, v0.3.0). Phase 1 deploy executed manually via `pulumi up --stack prod` (auto-deploy CI was broken via pre-existing OIDC issue, unrelated to migration). T30 DLQ live integration test passed on **2 distinct same-wave Session 14 casualties** (a 5,500-word Anthropic email at 187.2s + an 8,566-word meeting transcript at 323.7s) — both exceeded the OLD 120s Lambda ceiling, both completed cleanly inside DBOS's 900s workflow_timeout. **Problem A's failure class structurally solved, verified in production.** 14-day operational monitoring window opens 2026-05-22; Phase D PR (retire `/process` + cleanup) opens Day 14+ post-deploy as a separate PR.
+
 **Two planning sessions** (2026-05-20) produced an APPROVED design doc and APPROVED execution plan with 40 tasks.
 
 **Four implementation sessions** (2026-05-20 → 2026-05-21) shipped Phases A + B-1 + B-2 + C + E. The branch `feat/dbos-migration` is **10 commits ahead of `main`** — 9 substantive migration commits (listed below) plus 1 handoff-prep docs commit at branch HEAD:
@@ -223,9 +225,57 @@ The 2-week rollback window starts when Phase 2 deploys (T29). Phase 3 (T31 — d
 
 ---
 
-## Picking up from /ship complete — T29 deploy + T30 DLQ replay guide
+## Picking up at Day 14+ Phase D PR (current AIG entry point)
 
-**This is the CURRENT entry point for the next agent.** PR #14 (https://github.com/oneilstokeseqrm/action-item-graph/pull/14) is **MERGED to main** at v0.3.0 (merge commit `89351a3`, 2026-05-22). All Phase F absorption work shipped. The remaining work is the operational deploy + post-deploy live integration test.
+**Phase 1 is CLOSED as of 2026-05-22T14:55 UTC.** PR #14 merged + deployed + T30 live integration test passed (both 187.2s and 323.7s workflows verified Problem A is structurally solved). See "Phase 1 deploy + T30 live integration test execution log (2026-05-22)" below for the full deploy forensics.
+
+The next concrete work for AIG is **Phase D PR opening on or after 2026-06-05** (14 days post-deploy). Phase D retires the legacy compatibility layer alongside config cleanup. The 14-day window is operational monitoring, not a hard gate — Peter has no production users, so the window is about giving the system time to be observed in case any of the §2 known-limits surface unexpectedly.
+
+### Phase D scope (T18-T20 + cleanup)
+
+1. **Delete** `src/action_item_graph/api/routes/process.py` (the `/process` HTTP route)
+2. **Delete** `src/dispatcher/dispatcher.py` (the synchronous EnvelopeDispatcher used by `/process`)
+3. **Delete** migration-window-only test files:
+   - `tests/test_compatibility_process_route.py` (T32, Phase 1 mid-state only)
+   - `tests/test_workflow_behavioral_contract.py` (T25a, migration window only per docstring deletion-seam note)
+   - `tests/test_lambda_handler.py::TestT33DBOSUnreachable` (T33, Phase 2 deploy-order only)
+4. **Clean up `Pulumi.prod.yaml`** config entries:
+   - Remove `action-item-graph-infra:worker-api-key` (encrypted)
+   - Remove `action-item-graph-infra:api-base-url`
+5. **Update `infra/__main__.py`**: remove the `worker-api-key` keep-alive added in commit `23afb6b` (`fix(infra): keep worker-api-key alive during DBOS migration window`). Pulumi up will then garbage-collect the AWS Secrets Manager Secret + SecretVersion.
+
+### Phase D KEEP list (do NOT delete — long-term invariants)
+
+- `tests/test_concurrent_pipelines.py` (T34) — concurrent W2 execution is steady-state production behavior
+- `tests/test_topic_executor_idempotency.py` — pins Rule 6 retry safety for Topic + TopicVersion CREATEs
+- `tests/test_api_main.py::TestDBOSWorkflowRegistration` — pins cross-phase production-import-topology invariant (the deal_workflow registration regression test)
+
+### Things to verify before opening the Phase D PR
+
+- No incidents in the 14-day window
+- DLQ stayed empty (or only Lambda-level enqueue failures, not DBOS workflow failures)
+- `partial_enqueue_pair_count` CloudWatch metric stayed at 0 throughout
+- §2 known-limits (version counter drift, Owner CREATE race, S9a/S10a asymmetry) did not manifest in production OR were documented as benign
+
+### Things to NOT touch in Phase D
+
+- The DBOS migration code itself (workflows, steps, dispatcher) — Phase D only removes the legacy compat layer
+- The `eq_aig_dbos_sys` Neon database — stays alive past Phase D
+- Pulumi config `dbos-system-database-url` — stays
+- `.github/workflows/deploy-lambda.yml` — broken via pre-existing OIDC issue but workflow file is the contract for future automated deploys; fix OIDC trust + GHA secret separately
+
+### Hard constraints (still apply post-Phase-1)
+
+- DO NOT echo password literals in conversation
+- DO NOT use the pooler endpoint for any DBOS-related connection
+- DO NOT touch `live-transcription-fastapi` (separate repo)
+- DO NOT touch EQ test tenant `11111111-1111-4111-8111-111111111111`
+
+---
+
+## Picking up from /ship complete — T29 deploy + T30 DLQ replay guide (HISTORICAL — Phase 1 closed)
+
+**(Historical — Phase 1 deploy entry point, executed 2026-05-22. The current entry point is "Picking up at Day 14+ Phase D PR" above.)** PR #14 (https://github.com/oneilstokeseqrm/action-item-graph/pull/14) is **MERGED to main** at v0.3.0 (merge commit `89351a3`, 2026-05-22). All Phase F absorption work shipped. The remaining work is the operational deploy + post-deploy live integration test.
 
 The migration has been BUILT but not yet DEPLOYED. The Lambda code on `main` still expects `DBOS_SYSTEM_DATABASE_URL` (set by Pulumi to the Neon direct-connection string). That secret has NOT been set in Pulumi config yet — T29 is the manual step that does so. Until T29 happens, the deploy infrastructure is in a half-state: code is on main, Pulumi config is incomplete, Lambda code that would deploy via the auto-deploy workflow can't (and the workflow is currently broken anyway — see Step 0 below).
 
@@ -778,6 +828,103 @@ If the deal pipeline later starts showing concerning behavior under DBOS crash-r
 - **Tests:** 654 passing (reconciled vs main baseline 567 = +87 net). The earlier 649/554/95 framing was over-counted (Phase E shipped +71 net not +95; main baseline was 567 not 554). Confirm at /ship time via `git checkout main && uv run pytest --collect-only -q` (567) + `git checkout feat/dbos-migration && uv run pytest --collect-only -q` (654).
 - **Phase F pre-PR brief:** `docs/plans/2026-05-21-PHASE-F-PRE-PR-BRIEF.md` is the synthesized artifact (was skeleton at Phase E close; now filled in with all findings categorized, draft PR title + body, watchpoint observations).
 - **Pattern memory unchanged in Phase F:** the 8 rules still cover the absorbed findings; no Rule 9 earned (the Phase F gaps were repeat applications of Rule 6 + a cross-phase-cohesion concern that doesn't generalize to a numbered rule).
+
+---
+
+## Phase 1 deploy + T30 live integration test execution log (2026-05-22)
+
+PR #14 merged to main as merge commit `89351a3` on 2026-05-22. Auto-deploy CI (`.github/workflows/deploy-lambda.yml`) failed on the merge commit at the "Configure AWS credentials (OIDC)" step — pre-existing infrastructure issue (same failure mode as PR #10 merge from 2026-03-20), unrelated to the migration. The workflow has been inert for ~2 months. Deploy executed **manually** via `pulumi up --stack prod` from Peter's machine.
+
+### T29 secret handoff (manual, Peter)
+
+Per `feedback_secret_handoff_pattern.md`, password not echoed in conversation. Peter set:
+
+1. **Pulumi config**: `pulumi config set --secret dbos-system-database-url "<DIRECT_URL>"` where the URL hostname is `ep-silent-waterfall-adtinpn1.c-2.us-east-1.aws.neon.tech` (direct, NOT pooler — Neon's pooled endpoint breaks DBOS advisory locks).
+2. **Railway env var**: `DBOS_SYSTEM_DATABASE_URL` set in Railway dashboard for the `action-item-graph` `api` service. Manual redeploy triggered.
+
+Railway service had been failing to start since the PR #14 merge auto-redeploy (`dbos_runtime.py:54` fails fast when the env var is missing — two failed Railway deploys at 06:37 + 06:45 PT on 2026-05-22 confirm the fail-fast contract working as designed). After T29 env var add, manual redeploy at 09:48 PT succeeded with logs showing `DBOS launched (executor_id=6f553b3d-...)` + `lifespan.ready` + both queues listening (`action-item-pipeline`, `deal-pipeline`). The deal_workflow registration fix from commit `f8e282e` verified in production at this moment.
+
+### Pulumi preview discovery + Option 2 fix (commit `23afb6b`)
+
+First `pulumi preview --stack prod` flagged TWO unexpected DELETIONS not predicted by the deploy brief: `aws:secretsmanager:Secret` and `aws:secretsmanager:SecretVersion` for `worker-api-key`. Phase C's removal of `worker-api-key` from the `secrets={}` dict in `infra/__main__.py` had unintended cascading resource-graph implications. Codex R2's `b7477ff` commit had cleaned up the dead `secret_arn` export but didn't notice the underlying AWS resource was also being garbage-collected.
+
+**Surfaced to Peter per discipline #1.** Risk analysis: rollback path (`git revert <merge-sha> && pulumi up`) would have to recreate the Secret from the encrypted backup in `Pulumi.prod.yaml`, in a brief window where the recreated value would have to match Railway's `WORKER_API_KEY` env var byte-for-byte. Narrow risk but real if Railway env var rotated between Pulumi backups.
+
+**Peter approved Option 2**: restore `worker-api-key` to the `secrets={}` dict as an explicit migration-window keep-alive resource scheduled for Phase D removal. Fix landed as commit `23afb6b` (`fix(infra): keep worker-api-key alive during DBOS migration window`). Pushed to main. Aligns code with deploy brief's intent at the resource level.
+
+Second `pulumi preview` after the fix returned the clean 4-item diff: + Secret + SecretVersion for `dbos-system-database-url`, ~ IAM RolePolicy update, ~ Lambda Function update (new code + env vars). Stack output diff confirmed worker-api-key Secret preserved (`secret_arn` legacy alias renamed to `worker-api-key_secret_arn`, identical ARN value).
+
+### Pulumi up
+
+Applied in 50s on 2026-05-22T14:25 UTC. Lambda CodeSha256 updated to `Aa1KxqIo89Rpnq3NViw8MVP9J1L9qMnZUjtlsrb05NU=`. Env vars verified: `SECRET_NAME_DBOS_SYSTEM_DATABASE_URL` (new) + `SECRET_NAME_WORKER_API_KEY` (retained for rollback). Railway auto-redeployed at 14:23 UTC from the main push and DBOS launched cleanly again (executor_id `d2cee362-...`).
+
+One non-blocking warning: `pulumi_aws._utilities.py:314 UserWarning: name is deprecated. Use region instead.` Internal AWS provider call. Worth a follow-up pulumi-aws version bump; not migration-related.
+
+### T30 DLQ replay — TWO same-wave casualties discovered
+
+DLQ inspection (non-destructive receive with visibility-timeout=1s) revealed `ApproximateNumberOfMessages: 2` was NOT an SQS approximation artifact: two genuinely distinct MessageIds were present. **The Session 14 forensic addendum's "1 unique failed message exists" claim was wrong** — likely a receive-message-visibility timing artifact at the moment of the original Session 14 receive call (one message visibility-locked, didn't make it into the comparison). Three subsequent sessions inherited the wrong forensic conclusion.
+
+**Actual DLQ state:**
+
+| MessageId | Type | Sent (UTC) | Content size |
+|---|---|---|---|
+| `58863f20-3cda-48f7-973d-3002aa31331b` | EnvelopeV1.email | 2026-05-19T16:04:02 | ~5,500 words (Anthropic security questionnaire) |
+| `0cc72fb0-c475-42cc-a3a0-e0019e59a4f2` | EnvelopeV1.meeting | 2026-05-19T16:24:07 | 8,566 words / 73,405 chars (enterprise launch meeting transcript) |
+
+Both same tenant (`11111111-1111-4111-8111-111111111111`), same account (Anthropic `e008a004-95ec-5eb7-95ce-56108d0eed77`), both same-day Session 14 synthetic casualties (`extras.user_name: "EQ Synthetic Injection"`, `extras.synthetic_date` markers present on both). The meeting also had `extras.contacts_count: 3` and `extras.enrichment_source: "calendar_match"` — contact enrichment from Session 14's contact_ops work.
+
+**Problem A's actual scope was broader than the Session 14 forensic captured**: same failure class across BOTH email AND meeting envelope channels, not just email. Any envelope with content_length sufficient to push the 10-stage LLM pipeline past 120s could hit it.
+
+### T30 execution + results
+
+Triggered `aws sqs start-message-move-task` at 2026-05-22T14:48:34 UTC. Move task COMPLETED with `ApproximateNumberOfMessagesMoved: 2/2`.
+
+Lambda received both messages at T+7s, both dispatched with `record.enqueued` log lines in <200ms each (sub-second Lambda dispatcher contract verified). Both envelopes produced action-item + deal workflow pairs in DBOS state DB:
+
+| Workflow | Status | Duration | Notes |
+|---|---|---|---|
+| **Email action-item** (`interaction-ce62cbdb`) | **SUCCESS** | **187.2s** | 1.56× the old 120s ceiling |
+| Email deal | SUCCESS | 4.7s | `status: no_deals` — security questionnaire has no deal extraction |
+| **Meeting action-item** (`interaction-8bcd0dfc`) | **SUCCESS** | **323.7s** | **2.7× the old ceiling**; ran serially behind email (concurrency=1) |
+| Meeting deal | SUCCESS | 79.1s | `total_extracted: 1, deals_created: []` — merged with existing Anthropic deal |
+
+**All 4 workflows `recovery_attempts=1` (no retries fired, every step clean first attempt). All 4 workflow `error` columns EMPTY. CloudWatch `partial_enqueue_pair_count` = 0 (never fired). 2 Lambda invocations, 0 errors. Application version on workflow rows matches deployed Railway code.**
+
+### THE LOAD-BEARING NUMBERS
+
+**Email action-item workflow: 187.2 seconds. Meeting action-item workflow: 323.7 seconds.** Both exceeded the OLD Lambda's 120s timeout ceiling. Both completed cleanly inside DBOS's 900s workflow_timeout. **Problem A's failure class is structurally solved — verified in production on the highest-content envelopes that were available at the moment of cutover.**
+
+### Neo4j + Postgres state after T30
+
+**Neo4j** (live MCP query against shared DB at `neo4j+s://c6171c63.databases.neo4j.io`):
+- 6 ActionItems EXTRACTED_FROM the two interactions (5 meeting + 1 email), priority_scores 0.67–0.93, all commitment_strength explicit
+- 7 ActionItemTopics (6 meeting + 1 email): `enterprise production launch`, `enterprise deal proposal`, `vendor security compliance`, etc.
+- 6 Owners resolved (5 meeting + 1 email)
+- 3 Contacts ATTENDED on meeting (matches envelope's `extras.contacts_count`)
+- 0 NEW Deal nodes created. Two pre-existing Anthropic deals (`Anthropic Relationship Health Monitoring` v6, `Anthropic Meridian POC Expansion` v10) on the account; meeting deal pipeline extracted 1 candidate, matched + merged idempotently with existing (content matched → no new DealVersion snapshot → Rule 6 retry-safety contract holding under MERGE-on-deterministic-UUID5).
+
+**Postgres `action_items` table** (Neon `neondb`, queried via mcp__neon__run_sql):
+- 6 rows present with `source_interaction_id` matching T30 interactions
+- All 6 rows **pre-existed from 2026-05-19** (created via the synthetic data tool's direct-injection path on Session 14, completely separate from Lambda)
+- T30 today **UPDATED these existing rows idempotently** — `version_number` incremented (3 → 12 across rows), `updated_at` refreshed to 14:51–14:53 UTC
+- **No duplicate rows created.** Rule 6's MERGE-on-deterministic-UUID5 contract held end-to-end against the real-world "same envelope already partially processed via different path" condition — a stronger idempotency test than synthetic mocked unit tests can deliver.
+
+### concurrency=1 raise-criterion tracking
+
+Per locked decision D4: raise from concurrency=1 to higher after **100 successful invocations with zero DB/Neo4j/OpenAI errors AND queue-depth metric trending positive**. Counter starts now.
+
+**Tally as of T30 close: 4/100** (the 4 T30 workflows). 96 more clean invocations to go before considering raise. Counter resets if any step error fires.
+
+### Phase 1 closed
+
+Phase 1 = CLOSED on 2026-05-22T14:55 UTC. 14-day operational monitoring window opens now (light-touch: periodic DBOS dashboard checks, DLQ growth, Neo4j state consistency). Phase D PR (retire `/process` + `dispatcher.py` + migration-window-only tests + `Pulumi.prod.yaml` config cleanup including `worker-api-key`) opens Day 14+ post-deploy as a separate PR. 
+
+**Note**: Phase 2 of the broader project (synthetic data injection for Databricks, HashiCorp, OpenAI, Notion, Cursor) lives entirely in the `eq-synthetic-date-generation` repo and is being executed there in a separate session immediately. AIG agent not involved in Phase 2 execution from this point. The 14-day window is for operational monitoring of AIG's deployed Phase 1, NOT a bake-period gate on Phase 2.
+
+### Cross-references for future sessions
+
+- **eq-synthetic-date-generation HANDOFF.md** has the Session 14 closing addendum that originally documented the DLQ forensic (the one with the corrected-as-wrong "1 unique message" claim). When that addendum gets updated to reflect the 2-MessageId reality, link back to this section.
+- **The pre-deploy brief** at `docs/plans/2026-05-22-T29-T30-DEPLOY-BRIEF.md` has the filled-in "Deploy observations" section with full forensic details and the Phase 1 close summary.
 
 ---
 

@@ -342,66 +342,138 @@ See PR #14 body's "Deletion seam list" section + v0.3.0 CHANGELOG for the full e
 
 ---
 
-## Deploy observations — FILL IN DURING/AFTER DEPLOY
+## Deploy observations — FILLED IN POST-DEPLOY (2026-05-22)
 
 ### T29 secret-set timestamp + verification
 
-- [ ] Pulumi config set on machine: <hostname + date/time>
-- [ ] Railway env var set in dashboard: <date/time + service restart confirmed>
-- [ ] Hostname verified as direct (non-pooler): YES / NO
-- [ ] `pulumi config get dbos-system-database-url` returns expected URL: YES / NO
+- [x] **Pulumi config set on Peter's machine**: 2026-05-22 ~09:30 PT (commit `23afb6b` landed shortly after, encoding the new encrypted entry in `Pulumi.prod.yaml`)
+- [x] **Railway env var set in dashboard**: 2026-05-22 ~09:45 PT, redeploy triggered manually
+- [x] **Hostname verified as direct (non-pooler)**: YES (`ep-silent-waterfall-adtinpn1.c-2.us-east-1.aws.neon.tech` — no `-pooler` infix)
+- [x] **Pulumi config encrypted entry present**: YES (`dbos-system-database-url` shown as `[secret]` in `pulumi config --stack prod`)
+- [x] **Railway redeploy succeeded after env var add**: 2026-05-22T16:48:55 UTC (09:48 PT), prior 06:37 + 06:45 attempts FAILED (pre-T29; expected and confirmed the fail-fast contract in `dbos_runtime.py:54`)
 
-### Pulumi preview output
+### Pulumi preview output — first pass (caught a deletion the brief didn't predict)
 
 ```
-<paste pulumi preview output here>
++  aws:secretsmanager:Secret         action-item-graph-secret-dbos-system-database-url          create
++  aws:secretsmanager:SecretVersion  action-item-graph-secret-dbos-system-database-url-version  create
+~  aws:iam:RolePolicy                action-item-graph-ingest-policy                            update [diff: ~policy]
+~  aws:lambda:Function               action-item-graph-ingest                                   update [diff: ~code,environment,lastModified]
+-  aws:secretsmanager:SecretVersion  action-item-graph-secret-worker-api-key-version            DELETE
+-  aws:secretsmanager:Secret         action-item-graph-secret-worker-api-key                    DELETE
+
+Resources: + 2 to create   ~ 2 to update   - 2 to DELETE   8 unchanged
 ```
 
-Resource changes match expected? YES / NO + any unexpected items.
+**Resource changes did NOT match expected.** Two unexpected deletions of the `worker-api-key` AWS Secrets Manager resource (Secret + SecretVersion). The brief expected only the stack-output `secret_arn` to be renamed; not the underlying AWS Secret to be garbage-collected. Phase C's removal of `worker-api-key` from the `secrets={}` dict in `infra/__main__.py` had cascading resource-graph implications that weren't called out in the brief or codex absorption commits.
+
+**Decision**: Surfaced to Peter per discipline #1 ("anything beyond the expected list — stop and investigate"). Peter approved **Option 2**: restore worker-api-key to the secrets dict as an explicit migration-window keep-alive resource scheduled for Phase D removal. Aligns code with brief's intent and eliminates the rollback brittleness of recreating the Secret from Pulumi.prod.yaml's encrypted backup.
+
+**Fix landed as commit `23afb6b`**: `fix(infra): keep worker-api-key alive during DBOS migration window` (also commits the encrypted `dbos-system-database-url` Pulumi config entry from T29). Pushed to main.
+
+### Pulumi preview output — second pass (post-fix, clean diff)
+
+```
++  aws:secretsmanager:Secret         action-item-graph-secret-dbos-system-database-url          create
++  aws:secretsmanager:SecretVersion  action-item-graph-secret-dbos-system-database-url-version  create
+~  aws:iam:RolePolicy                action-item-graph-ingest-policy                            update [diff: ~policy]
+~  aws:lambda:Function               action-item-graph-ingest                                   update [diff: ~code,environment,lastModified]
+
+Outputs:
+  + dbos-system-database-url_secret_arn: [unknown]
+  - secret_arn                         : "arn:aws:secretsmanager:us-east-1:211125681610:secret:/action-item-graph/worker-api-key-ezZqZq"
+  + worker-api-key_secret_arn          : "arn:aws:secretsmanager:us-east-1:211125681610:secret:/action-item-graph/worker-api-key-ezZqZq"
+
+Resources: + 2 to create   ~ 2 to update   10 unchanged
+```
+
+**Zero AWS resource deletions.** Output diff shows `secret_arn` legacy alias being replaced by `worker-api-key_secret_arn`, but both have the IDENTICAL ARN value — confirming the underlying Secret is preserved end-to-end. Matches expected list.
 
 ### Pulumi up outcome
 
-- [ ] Pulumi up succeeded
-- [ ] Resources changed: <count + types>
-- [ ] Time elapsed: <minutes>
-- [ ] Any warnings or recoverable errors: <notes>
+- [x] **Pulumi up succeeded**
+- [x] **Resources changed**: + 2 created (Secret + SecretVersion), ~ 2 updated (IAM RolePolicy, Lambda Function), 10 unchanged. Zero deletions.
+- [x] **Time elapsed**: 50 seconds
+- [x] **Lambda CodeSha256 changed**: `Aa1KxqIo89Rpnq3NViw8MVP9J1L9qMnZUjtlsrb05NU=`, LastModified `2026-05-22T14:26:07.000+0000`
+- [x] **Lambda env vars verified post-deploy**: `SECRET_NAME_DBOS_SYSTEM_DATABASE_URL=/action-item-graph/dbos-system-database-url` (new) + `SECRET_NAME_WORKER_API_KEY=/action-item-graph/worker-api-key` (kept for rollback safety per Option 2)
+- [x] **Warnings**: One pulumi_aws SDK deprecation warning `name is deprecated. Use region instead` — unrelated to migration, internal AWS provider call, no functional impact. Worth a follow-up PR upgrading the pulumi-aws version eventually.
 
 ### Railway DBOS launch verification
 
-- [ ] "DBOS launched (executor_id=...)" log line present in Railway logs at startup
-- [ ] "lifespan.ready" log line present
-- [ ] `SELECT * FROM dbos.workflow_status` returns rows (or 0 cleanly) — NOT an error
-- [ ] DBOS schema exists in `eq_aig_dbos_sys`
+- [x] **"DBOS launched (executor_id=...)" log line present**: YES at 2026-05-22T13:50:00 UTC (first launch after T29 env var set) and again at 2026-05-22T14:24:15 UTC (post-Pulumi-up auto-redeploy from my push to main). Executor IDs: `6f553b3d-a3bb-4f94-b6e9-0255436e10b5`, then `d2cee362-1ad0-4ed8-8d06-09737e888a1a`.
+- [x] **"lifespan.ready" log line present**: YES on both launches
+- [x] **DBOS schema exists in `eq_aig_dbos_sys`**: YES, queryable via `mcp__neon__run_sql` against `super-glitter-11265514`/`eq_aig_dbos_sys`. `SELECT FROM dbos.workflow_status` returned 0 rows pre-T30 (clean start), no error.
+- [x] **Both queue listeners active**: `action-item-pipeline` (concurrency=1) + `deal-pipeline` (concurrency=1). Confirms the Phase F `deal_workflow` registration fix (commit `f8e282e`) is operative in production.
 
 ### First N envelopes through the new path
 
-- [ ] First envelope processed: timestamp <T1>, workflow_id <id>
-- [ ] First 10 envelopes processed without errors: YES / NO
-- [ ] `partial_enqueue_pair_count` CloudWatch metric stayed at 0: YES / NO
-- [ ] Any workflow stuck in PENDING > 15 min: <notes>
+**Observed: 0 organic envelopes in the 24-hour window prior to T30.** Peter has no production users right now — upstream services (LTF, email-pipeline) only emit envelopes when actually used. The "watch 10 organic envelopes" check assumed production traffic exists; it doesn't for this project. Per Peter's direction, organic-traffic gate was skipped; T30 DLQ redrive served as the live integration test by design.
+
+- [N/A] First envelope processed organically: NO ORGANIC TRAFFIC in window
+- [N/A] First 10 envelopes: NO ORGANIC TRAFFIC
+- [x] **`partial_enqueue_pair_count` CloudWatch metric stayed at 0**: YES (no datapoints — never fired across the deploy and T30)
+- [N/A] Workflow stuck in PENDING > 15 min: N/A
 
 ### T30 DLQ replay result
 
-- [ ] DLQ message `58863f20-3cda-48f7-973d-3002aa31331b` redriven at: <timestamp>
-- [ ] Lambda received the message: <CloudWatch log timestamp>
-- [ ] Both workflows enqueued: action-item workflow_id <id>, deal workflow_id <id>
-- [ ] Action-item workflow status timeline: ENQUEUED <T1> → PENDING <T2> → SUCCESS <T3>
-- [ ] Deal workflow status timeline: ENQUEUED <T1> → PENDING <T2> → SUCCESS <T3>
-- [ ] Total workflow duration for the action-item workflow: <minutes>
-- [ ] Total workflow duration for the deal workflow: <minutes>
-- [ ] Action_items created in Neo4j: <count>
-- [ ] Deals created in Neo4j: <count>
-- [ ] Postgres dual-write rows present: YES / NO
-- [ ] **The win — did the message that previously exhausted Lambda's 120s timeout now succeed?** YES / NO
+**Two distinct DLQ messages discovered (Session 14 forensic correction):**
 
-### Known-limits monitoring start
+| MessageId | Type | Sent | Content |
+|---|---|---|---|
+| `58863f20-3cda-48f7-973d-3002aa31331b` | EnvelopeV1.email | 2026-05-19T16:04:02 UTC | Anthropic security questionnaire, ~5,500 words |
+| `0cc72fb0-c475-42cc-a3a0-e0019e59a4f2` | EnvelopeV1.meeting | 2026-05-19T16:24:07 UTC | Enterprise launch meeting transcript, 8,566 words / 73,405 chars |
 
-Start watching the HANDOFF.md §2 known-limits as of post-T30:
-- [ ] Watch `version` field drift on ActionItem / Deal under retry (CAS not implemented)
-- [ ] Watch for duplicate Owner nodes (cross-workflow concurrent race window)
-- [ ] Confirm dashboards understand S9a < S9b invocation count asymmetry
+Both same-wave Session 14 synthetic casualties: same tenant (`11111111-1111-4111-8111-111111111111`), same account (Anthropic `e008a004-95ec-5eb7-95ce-56108d0eed77`), both content-heavy enough to hit the OLD 120s Lambda timeout. The original Session 14 forensic at the eq-synthetic-date-generation HANDOFF claimed "1 unique message" — likely a receive-message-visibility timing artifact at the moment of the original receive call. **Both messages redriven together as a richer integration test.**
 
-Document any first-occurrences here as they appear.
+- [x] **DLQ messages redriven at**: 2026-05-22T14:48:34 UTC (`aws sqs start-message-move-task` returned `ApproximateNumberOfMessagesMoved: 2/2`)
+- [x] **Lambda received both messages**: T+~7s at 14:48:40.997 UTC (email) + 14:48:41.510 UTC (meeting); both with `cold_start: true` (Lambda had been idle 24h)
+- [x] **Both workflows enqueued per envelope**:
+  - Email: `action-item-graph:action-item:interaction-ce62cbdb-a3f9-4b7d-8dfd-a5f284ef9e14` + `action-item-graph:deal:interaction-ce62cbdb-a3f9-4b7d-8dfd-a5f284ef9e14`
+  - Meeting: `action-item-graph:action-item:interaction-8bcd0dfc-465b-45ea-83fa-d81f25126141` + `action-item-graph:deal:interaction-8bcd0dfc-465b-45ea-83fa-d81f25126141`
+- [x] **All 4 workflow status timelines reached SUCCESS** (recovery_attempts=1 on all, meaning first attempt clean, no retries fired):
+
+| Workflow | Status | Duration | Notes |
+|---|---|---|---|
+| Email action-item | SUCCESS | **187.2s** | Created 18:48:41.016, Done 18:51:48.242 UTC |
+| Email deal | SUCCESS | 4.7s | `status: no_deals` — security questionnaire has no deal extraction, legitimate |
+| Meeting action-item | SUCCESS | **323.7s** | Created 18:48:41.572, Done 18:54:05.259 UTC. Ran serially behind email (concurrency=1 queue) |
+| Meeting deal | SUCCESS | 79.1s | `total_extracted: 1, deals_created: []` — merged with existing Anthropic deal, no new Deal created |
+
+- [x] **Action_items in Neo4j**: 5 EXTRACTED_FROM meeting + 1 EXTRACTED_FROM email = 6 total ActionItems. Quality outputs (enterprise launch / DPA / security review themes), priority_scores 0.67–0.93, all `commitment_strength="explicit"`-class items.
+- [x] **Deals created in Neo4j**: 0 NEW. Two pre-existing Anthropic deals on the account ("Anthropic Relationship Health Monitoring" v6, "Anthropic Meridian POC Expansion" v10) — meeting workflow extracted 1 deal candidate, matched and merged idempotently with existing (content matched, no version snapshot needed — Rule 6 retry-safety contract holding).
+- [x] **ActionItemTopics created**: 6 for meeting (`enterprise production launch`, `enterprise deal proposal`, etc.) + 1 for email (`vendor security compliance`). All linked via `BELONGS_TO`.
+- [x] **Owners resolved**: 5 distinct (Ben, Diana Vasquez, Marcus Chen, Lior Sadan, etc. for meeting) + 1 (Lior Sadan for email).
+- [x] **Contacts ATTENDED on meeting**: 3 (matches `extras.contacts_count=3` from envelope — contact enrichment from Session 14's contact_ops work intact).
+- [x] **Postgres dual-write rows present**: YES, 6 rows in `action_items` table with `source_interaction_id` matching T30 interactions. **All UPDATED idempotently** — created originally on 2026-05-19 via the synthetic data tool's direct injection path (separate from Lambda); today's T30 pipeline incremented `version_number` (3→12 across rows) and updated `updated_at` to 14:51–14:53 UTC. **No duplicate rows. Rule 6's MERGE-on-deterministic-UUID5 contract held end-to-end** against real-world "same envelope already partially processed via different path" conditions.
+- [x] **Workflow output `error` columns**: ALL EMPTY across 4 workflows. Zero errors.
+- [x] **Application version on workflow rows**: `43d87c4fca8441f6a51237e428a55eae` (matches the deployed Railway app version) — confirms workflows executed by the new DBOS code path, not legacy.
+- [x] **CloudWatch Lambda metrics during T30**: 2 invocations, 0 errors, `partial_enqueue_pair_count` = 0 sum (never fired).
+- [x] **THE WIN — did the message that previously exhausted Lambda's 120s timeout now succeed?** **YES.** Both load-bearing numbers:
+  - **Email action-item: 187.2s** — 1.56× the old 120s ceiling; would have hard-failed on old Lambda.
+  - **Meeting action-item: 323.7s** — **2.7× the old ceiling**; the dominant content-heavy proof.
+
+Both completed cleanly inside DBOS's 900s workflow_timeout. **Problem A's failure class is structurally solved.**
+
+### Known-limits monitoring start (HANDOFF §2)
+
+Start watching as of post-T30 (2026-05-22T14:55 UTC):
+- [ ] **Version counter drift under retry** — `update_action_item` / `update_deal` use `SET version = version + 1` without CAS. recovery_attempts=1 on all 4 T30 workflows = no retries fired today, so this concern didn't exercise. Watch organic traffic when it resumes.
+- [ ] **Owner CREATE narrow cross-workflow race** — no concurrent workflows during T30 (concurrency=1 + only 2 envelopes), so the narrow-race window didn't exercise either. Watch for duplicate Owner nodes via periodic dedup query once organic traffic resumes.
+- [ ] **S9a/S9b per-step instrumentation asymmetry** — dashboards should encode this; no action needed unless alerting fires on the gap.
+
+### `concurrency=1` raise-criterion tracking starts now
+
+Per locked decision D4: raise to 3 after **100 successful invocations with zero DB/Neo4j/OpenAI errors AND queue-depth metric trending positive**.
+
+**Tally: 4/100 today (the 4 T30 workflows).** 96 more clean invocations to go before raising. Counter resets if any error fires.
+
+---
+
+## Phase 1 close summary
+
+T29 (manual secret + Railway env var) + Pulumi up (Lambda code + new Secret + IAM policy expansion) + T30 (DLQ live integration test on 2 envelopes) all clean. Migration's structural goal — eliminate the 120s Lambda timeout failure class via per-step checkpointed DBOS workflows — verified on the highest-content envelopes that were available in production state at the time of cutover.
+
+**Phase 1 = CLOSED.** Phase D (retire `/process` + `dispatcher.py` + migration-window-only tests + `Pulumi.prod.yaml` config cleanup including `worker-api-key`) opens as a separate PR Day 14+ post-deploy. 14-day operational monitoring window starts now.
 
 ---
 
