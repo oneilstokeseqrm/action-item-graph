@@ -34,7 +34,7 @@ uv pip install \
     --python-version 3.11 \
     --only-binary :all: \
     pydantic pydantic-settings "aws-lambda-powertools[tracer]" \
-    "dbos>=2.22.0,<3.0" "psycopg[binary]>=3.2.0"
+    "dbos==2.22.0" "psycopg[binary]>=3.2.0"
 
 # 2. Copy only the lambda_ingest subpackage
 echo "--- Copying Lambda code ---"

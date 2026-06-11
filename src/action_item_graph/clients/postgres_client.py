@@ -23,6 +23,8 @@ Tables written:
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
@@ -30,7 +32,7 @@ from uuid import UUID
 
 import structlog
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
 from ..models.action_item import ActionItem, ActionItemVersion
 from ..models.entities import Owner
@@ -38,6 +40,21 @@ from ..models.topic import ActionItemTopic, ActionItemTopicVersion
 from deal_graph.models.deal import Deal, DealStage, DealVersion, OntologyScores
 
 logger = structlog.get_logger(__name__)
+
+# Tenant-scoping GUC for Postgres row-level security (RLS).
+#
+# In production the service connects as a least-privilege NOBYPASSRLS role and
+# several of the tables written here carry tenant-isolation RLS policies keyed
+# on ``current_setting('app.tenant_id')``. Every tenant-scoped statement MUST
+# therefore run inside a transaction whose FIRST statement sets the GUC, or
+# the write fails closed (and the dual-write's failure isolation would swallow
+# the error silently). ``set_config(..., is_local=true)`` scopes the setting to
+# the enclosing transaction only — nothing leaks back to the pool.
+#
+# In dev the service connects as the database owner (BYPASSRLS), where this is
+# a harmless no-op — identical code in both environments by design.
+# Invariant documented in docs/PROD-RLS-INVARIANT.md.
+SET_TENANT_SCOPE_SQL = text("SELECT set_config('app.tenant_id', :tenant_id, true)")
 
 # Neo4j status → Postgres ActionItemStatus enum mapping.
 # Neo4j uses: open, in_progress, completed, cancelled, deferred
@@ -232,6 +249,19 @@ class PostgresClient:
             logger.exception('postgres_client.connectivity_check_failed')
             return False
 
+    @asynccontextmanager
+    async def scoped_begin(self, tenant_id: UUID | str) -> AsyncIterator[AsyncConnection]:
+        """Open a transaction with ``app.tenant_id`` set as its first statement.
+
+        Every tenant-scoped write in this client (and the agent-outbox write in
+        the pipeline) must use this instead of ``engine.begin()`` directly —
+        under the production NOBYPASSRLS role, RLS-protected tables reject
+        statements that run without the GUC. See SET_TENANT_SCOPE_SQL above.
+        """
+        async with self.engine.begin() as conn:
+            await conn.execute(SET_TENANT_SCOPE_SQL, {'tenant_id': str(tenant_id)})
+            yield conn
+
     # =========================================================================
     # Action Item UPSERT
     # =========================================================================
@@ -339,7 +369,7 @@ class PostgresClient:
             'definition_of_done': item.definition_of_done,
         }
 
-        async with self.engine.begin() as conn:
+        async with self.scoped_begin(item.tenant_id) as conn:
             await conn.execute(sql, params)
 
         logger.debug('postgres_client.upsert_action_item', action_item_id=item_id)
@@ -389,7 +419,7 @@ class PostgresClient:
             'created_at': _to_pg_ts(version.created_at),
         }
 
-        async with self.engine.begin() as conn:
+        async with self.scoped_begin(version.tenant_id) as conn:
             await conn.execute(sql, params)
 
         logger.debug(
@@ -452,7 +482,7 @@ class PostgresClient:
             'updated_at': _to_pg_ts(topic.updated_at),
         }
 
-        async with self.engine.begin() as conn:
+        async with self.scoped_begin(topic.tenant_id) as conn:
             await conn.execute(sql, params)
 
         logger.debug('postgres_client.upsert_topic', topic_id=topic_id)
@@ -488,7 +518,7 @@ class PostgresClient:
             'created_at': _to_pg_ts(version.created_at),
         }
 
-        async with self.engine.begin() as conn:
+        async with self.scoped_begin(version.tenant_id) as conn:
             await conn.execute(sql, params)
 
         logger.debug(
@@ -533,7 +563,7 @@ class PostgresClient:
             'method': method,
         }
 
-        async with self.engine.begin() as conn:
+        async with self.scoped_begin(tenant_id) as conn:
             await conn.execute(sql, params)
 
         logger.debug(
@@ -582,7 +612,7 @@ class PostgresClient:
             'created_at': _to_pg_ts(owner.created_at),
         }
 
-        async with self.engine.begin() as conn:
+        async with self.scoped_begin(owner.tenant_id) as conn:
             await conn.execute(sql, params)
 
         logger.debug('postgres_client.upsert_owner', owner_id=owner_id)
@@ -628,7 +658,7 @@ class PostgresClient:
             'entity_id': _to_pg_uuid(entity_id),
         }
 
-        async with self.engine.begin() as conn:
+        async with self.scoped_begin(tenant_id) as conn:
             await conn.execute(sql, params)
 
         logger.debug(
@@ -912,7 +942,7 @@ class PostgresClient:
             **dim_params,
         }
 
-        async with self.engine.begin() as conn:
+        async with self.scoped_begin(deal.tenant_id) as conn:
             result = await conn.execute(text(sql), params)
             row = result.fetchone()
             pg_id: UUID = row[0]  # type: ignore[index]
@@ -994,7 +1024,7 @@ class PostgresClient:
             'valid_until': _to_pg_ts(version.valid_until),
         }
 
-        async with self.engine.begin() as conn:
+        async with self.scoped_begin(version.tenant_id) as conn:
             await conn.execute(text(sql), params)
 
         logger.info(
@@ -1019,7 +1049,7 @@ class PostgresClient:
         VALUES (:tenant_id, :interaction_id, 'opportunity', :entity_id)
         ON CONFLICT DO NOTHING
         """
-        async with self.engine.begin() as conn:
+        async with self.scoped_begin(tenant_id) as conn:
             await conn.execute(text(sql), {
                 'tenant_id': _to_pg_uuid(tenant_id),
                 'interaction_id': _to_pg_uuid(interaction_id),

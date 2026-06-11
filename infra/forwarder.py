@@ -18,10 +18,12 @@ Data flow:
   SQS Queue ──(redrive after N failures)──> SQS DLQ
       │ event source mapping (BatchSize=1)
       ▼
-  Lambda (thin forwarder)
-      │ HTTPS POST + Bearer token from Secrets Manager
+  Lambda (dispatcher)
+      │ DBOSClient.enqueue using the DBOS system database URL
+      │ fetched from Secrets Manager (Phase C cutover — the Lambda
+      │ no longer POSTs to the Railway service over HTTP)
       ▼
-  Railway service
+  DBOS system Postgres (workflows picked up by the Railway service)
 """
 
 from dataclasses import dataclass
@@ -63,6 +65,8 @@ def create_forwarder_stack(
     lambda_memory_mb: int = 256,
     lambda_timeout_seconds: int = 120,
     rule_description: str | None = None,
+    permissions_boundary: str | None = None,
+    metrics_namespace: str | None = None,
 ) -> ForwarderOutputs:
     """Create the full EventBridge → SQS → Lambda forwarder stack.
 
@@ -81,6 +85,14 @@ def create_forwarder_stack(
         lambda_memory_mb: Lambda memory allocation in MB.
         lambda_timeout_seconds: Lambda timeout in seconds.
         rule_description: Optional description for the EventBridge rule.
+        permissions_boundary: Optional IAM permissions-boundary policy ARN
+            attached to the Lambda execution role. Accounts that enforce a
+            boundary on CI-created roles (the prod account's
+            eq-prod-service-boundary) deny CreateRole without it.
+        metrics_namespace: Optional CloudWatch namespace the Lambda emits
+            custom metrics to (grants cloudwatch:PutMetricData scoped to
+            that namespace). The handler emits partial_enqueue_pair_count
+            under "ActionItemGraph/Lambda".
 
     Returns:
         ForwarderOutputs with ARNs and URLs of all created resources.
@@ -185,6 +197,7 @@ def create_forwarder_stack(
         f"{service_name}-ingest-role",
         name=f"{service_name}-ingest-role",
         description=f"Execution role for {service_name}-ingest Lambda",
+        permissions_boundary=permissions_boundary,
         assume_role_policy=json.dumps(
             {
                 "Version": "2012-10-17",
@@ -235,6 +248,21 @@ def create_forwarder_stack(
                 "Resource": "*",
             },
         ]
+
+        # PutMetricData has no resource-level scoping; bind it to the
+        # namespace the handler emits under instead.
+        if metrics_namespace:
+            statements.append(
+                {
+                    "Sid": "CloudWatchMetrics",
+                    "Effect": "Allow",
+                    "Action": ["cloudwatch:PutMetricData"],
+                    "Resource": "*",
+                    "Condition": {
+                        "StringEquals": {"cloudwatch:namespace": metrics_namespace}
+                    },
+                }
+            )
 
         # Add Secrets Manager permissions if secrets exist
         secret_arn_vals = args[1:]

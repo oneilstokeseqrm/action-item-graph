@@ -64,15 +64,19 @@ def _make_envelope():
 
 
 def _make_mock_postgres():
-    """Create a mock Postgres client with a working async context manager."""
+    """Create a mock Postgres client with a working async context manager.
+
+    The outbox write goes through ``PostgresClient.scoped_begin(tenant_id)``
+    (which sets the tenant RLS GUC before yielding the connection), so the
+    mock exposes ``scoped_begin`` directly; the GUC statement itself is the
+    real client's responsibility (covered in test_postgres_client.py).
+    """
     mock_conn = AsyncMock()
     mock_cm = AsyncMock()
     mock_cm.__aenter__ = AsyncMock(return_value=mock_conn)
     mock_cm.__aexit__ = AsyncMock(return_value=False)
-    mock_engine = MagicMock()
-    mock_engine.begin = MagicMock(return_value=mock_cm)
     postgres = MagicMock()
-    postgres.engine = mock_engine
+    postgres.scoped_begin = MagicMock(return_value=mock_cm)
     return postgres, mock_conn
 
 

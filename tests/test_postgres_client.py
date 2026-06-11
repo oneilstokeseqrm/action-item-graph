@@ -45,6 +45,20 @@ TENANT_ID = UUID('550e8400-e29b-41d4-a716-446655440000')
 ACCOUNT_ID = 'acct_test_001'
 
 
+def _assert_scoped_write(conn, tenant_id=TENANT_ID, statements: int = 1) -> None:
+    """Assert a write ran as (tenant GUC, then statement(s)) on one transaction.
+
+    Every tenant-scoped writer goes through ``PostgresClient.scoped_begin``,
+    so the FIRST execute on the transaction must be
+    ``set_config('app.tenant_id', ...)`` with the right tenant, followed by
+    the actual statement(s). See docs/PROD-RLS-INVARIANT.md.
+    """
+    assert conn.execute.await_count == 1 + statements
+    guc_args = conn.execute.await_args_list[0][0]
+    assert "set_config('app.tenant_id'" in str(guc_args[0])
+    assert guc_args[1] == {'tenant_id': str(tenant_id)}
+
+
 @pytest.fixture
 def mock_engine():
     """Create a mock AsyncEngine with a mock connection context manager."""
@@ -320,7 +334,7 @@ class TestUpsertActionItem:
     async def test_upsert_executes_sql(self, client, mock_engine, sample_action_item):
         _, conn = mock_engine
         await client.upsert_action_item(sample_action_item)
-        conn.execute.assert_awaited_once()
+        _assert_scoped_write(conn)
 
     @pytest.mark.asyncio
     async def test_upsert_maps_status_open_to_pending(self, client, mock_engine, sample_action_item):
@@ -399,7 +413,7 @@ class TestInsertActionItemVersion:
     async def test_insert_version(self, client, mock_engine, sample_version):
         _, conn = mock_engine
         await client.insert_action_item_version(sample_version)
-        conn.execute.assert_awaited_once()
+        _assert_scoped_write(conn)
 
     @pytest.mark.asyncio
     async def test_version_params(self, client, mock_engine, sample_version):
@@ -420,7 +434,7 @@ class TestUpsertTopic:
     async def test_upsert_topic(self, client, mock_engine, sample_topic):
         _, conn = mock_engine
         await client.upsert_topic(sample_topic)
-        conn.execute.assert_awaited_once()
+        _assert_scoped_write(conn)
 
     @pytest.mark.asyncio
     async def test_topic_params(self, client, mock_engine, sample_topic):
@@ -442,7 +456,7 @@ class TestInsertTopicVersion:
     async def test_insert_topic_version(self, client, mock_engine, sample_topic_version):
         _, conn = mock_engine
         await client.insert_topic_version(sample_topic_version)
-        conn.execute.assert_awaited_once()
+        _assert_scoped_write(conn)
 
 
 class TestUpsertTopicMembership:
@@ -458,7 +472,7 @@ class TestUpsertTopicMembership:
             confidence=0.85,
             method='resolved',
         )
-        conn.execute.assert_awaited_once()
+        _assert_scoped_write(conn)
 
         params = conn.execute.call_args[0][1]
         assert params['confidence'] == 0.85
@@ -472,7 +486,7 @@ class TestUpsertOwner:
     async def test_upsert_owner(self, client, mock_engine, sample_owner):
         _, conn = mock_engine
         await client.upsert_owner(sample_owner)
-        conn.execute.assert_awaited_once()
+        _assert_scoped_write(conn)
 
     @pytest.mark.asyncio
     async def test_owner_params(self, client, mock_engine, sample_owner):
@@ -513,7 +527,7 @@ class TestLinkActionItemToEntity:
             entity_type='account',
             entity_id=uuid4(),
         )
-        conn.execute.assert_awaited_once()
+        _assert_scoped_write(conn)
 
     @pytest.mark.asyncio
     async def test_link_interaction(self, client, mock_engine):
@@ -524,7 +538,7 @@ class TestLinkActionItemToEntity:
             entity_type='interaction',
             entity_id=uuid4(),
         )
-        conn.execute.assert_awaited_once()
+        _assert_scoped_write(conn)
 
 
 # =============================================================================
@@ -583,17 +597,14 @@ class TestPersistActionItemFull:
         """Owner write failure should not prevent action item write."""
         _, conn = mock_engine
 
-        call_count = 0
         original_execute = conn.execute
 
-        async def _failing_on_second(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 2:
+        async def _failing_on_owner_insert(*args, **kwargs):
+            if 'INSERT INTO action_item_owners' in str(args[0]):
                 raise Exception('Owner write failed')
             return await original_execute(*args, **kwargs)
 
-        conn.execute = AsyncMock(side_effect=_failing_on_second)
+        conn.execute = AsyncMock(side_effect=_failing_on_owner_insert)
 
         # Should not raise despite owner failure
         await client.persist_action_item_full(
@@ -608,17 +619,14 @@ class TestPersistActionItemFull:
         """Topic write failure should not prevent action item write."""
         _, conn = mock_engine
 
-        call_count = 0
         original_execute = conn.execute
 
-        async def _failing_on_second(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 2:
+        async def _failing_on_topic_upsert(*args, **kwargs):
+            if 'INSERT INTO action_item_topics ' in str(args[0]):
                 raise Exception('Topic write failed')
             return await original_execute(*args, **kwargs)
 
-        conn.execute = AsyncMock(side_effect=_failing_on_second)
+        conn.execute = AsyncMock(side_effect=_failing_on_topic_upsert)
 
         # Should not raise despite topic failure
         await client.persist_action_item_full(
