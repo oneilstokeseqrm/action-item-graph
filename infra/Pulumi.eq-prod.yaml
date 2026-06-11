@@ -7,3 +7,8 @@ config:
   # `pulumi config set --secret` adds their ciphertext here then. The program
   # never commits placeholder secrets: `pulumi.Config.require_secret` would let
   # an accidental apply create a live Lambda with bogus DBOS configuration.
+
+  action-item-graph-infra:dbos-system-database-url:
+    secure: AAABAJp5/ZueLX3gDwiCv+90aKtQh2uCBsWewQnZHvAddfJwJdDjmgIPlG9ooHryP4JDs4iqdzyOcBO/P+GtRDf0DIQ9xirfMWMeJ0GKl+D8xga4d0npy2k5SvBXtvRczD6I1R1SFgbIeMibEcxF8t1N2IjUdRb5fWL+TkIlarX8vzjsl2nHPeT5sExzWuKCoBnZlBPDeOk+vOd47DKrrTIErPgqJywS1dugqNGvuS9evYDnUkb/NB41Uc4Z5B8q4bdT53O6TpcvYYdUBZadC7qRSnZgEw==
+  action-item-graph-infra:worker-api-key:
+    secure: AAABANE9SBi1wdNFR8n9DJH9Oyd/XqlC4Mp14sQZrC1BK+sluc/oV35wazSM/DiQleyPyI9dLWV11WaFdeG6EqOjfECrJHI0wPAqZ6B4cRU=
