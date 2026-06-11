@@ -112,7 +112,11 @@ class TestUpsertDeal:
 
         await client.upsert_deal(sample_deal)
 
-        mock_conn.execute.assert_called_once()
+        # scoped_begin sets the tenant GUC first, then the statement runs.
+        assert mock_conn.execute.await_count == 2
+        guc_args = mock_conn.execute.await_args_list[0][0]
+        assert "set_config('app.tenant_id'" in str(guc_args[0])
+        assert guc_args[1] == {'tenant_id': str(sample_deal.tenant_id)}
         call_args = mock_conn.execute.call_args
         sql_text = str(call_args[0][0])
         # Must target graph_opportunity_id for conflict resolution
@@ -379,7 +383,11 @@ class TestInsertDealVersion:
 
         await client.insert_deal_version(sample_deal_version)
 
-        mock_conn.execute.assert_called_once()
+        # scoped_begin sets the tenant GUC first, then the statement runs.
+        assert mock_conn.execute.await_count == 2
+        guc_args = mock_conn.execute.await_args_list[0][0]
+        assert "set_config('app.tenant_id'" in str(guc_args[0])
+        assert guc_args[1] == {'tenant_id': str(sample_deal_version.tenant_id)}
         call_args = mock_conn.execute.call_args
         sql_text = str(call_args[0][0])
         assert 'deal_versions' in sql_text

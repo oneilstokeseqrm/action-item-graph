@@ -1159,7 +1159,7 @@ class ActionItemPipeline:
                     if envelope.extras else None,
             }
 
-            async with self.postgres.engine.begin() as conn:
+            async with self.postgres.scoped_begin(tenant_id) as conn:
                 await conn.execute(
                     text("""
                         INSERT INTO agent_action_outbox (

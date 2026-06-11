@@ -1,0 +1,9 @@
+config:
+  aws:region: us-east-1
+  action-item-graph-infra:expected-account-id: "009907129037"
+  action-item-graph-infra:permissions-boundary-arn: arn:aws:iam::009907129037:policy/eq-prod-service-boundary
+  # Secrets (dbos-system-database-url, worker-api-key) are intentionally ABSENT
+  # until the prod stack is initialized with real values at apply time —
+  # `pulumi config set --secret` adds their ciphertext here then. The program
+  # never commits placeholder secrets: `pulumi.Config.require_secret` would let
+  # an accidental apply create a live Lambda with bogus DBOS configuration.

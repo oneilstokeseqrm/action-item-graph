@@ -1,0 +1,70 @@
+# Keyless prod-infra deploy for the ISOLATED PROD environment (account
+# 009907129037) — stack `eq-prod` only.
+#
+# manual-dispatch ONLY (no push trigger): the prod apply is a deliberate,
+# founder-gated act, and this repo's other stack (`prod`) owns the LIVE DEV
+# chain — a push-triggered `pulumi up` here once nearly meant dev applies with
+# prod credentials. Dev-chain applies remain local (`pulumi up --stack prod`).
+#
+# Replaces the historical push-triggered deploy-lambda.yml (never ran green:
+# its OIDC step failed on every run — secrets were never configured).
+#
+# NOTE: GitHub sometimes does not register a brand-new workflow on a private
+# repo until a LATER push touches this file (GAP-065). If `gh workflow list`
+# shows nothing, push a commit touching this file before falling back to the
+# admin path.
+#
+# Action versions = the program's verified Node-24 set (2026-06): checkout@v5
+# (deliberately NOT v6 — its credential-persistence change is unwanted),
+# setup-python@v6, setup-uv pinned exact (v8+ has no floating major tags),
+# configure-aws-credentials@v6 (v5 is still node20), pulumi/actions@v7.
+
+name: Deploy prod infra
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    name: Package & deploy (eq-prod)
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # Required for OIDC
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.2.0
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Package Lambda
+        run: bash scripts/package_lambda.sh
+
+      - name: Install Pulumi dependencies
+        working-directory: infra
+        run: |
+          python -m venv venv
+          source venv/bin/activate
+          pip install -r requirements.txt
+
+      - name: Deploy with Pulumi
+        uses: pulumi/actions@v7
+        with:
+          command: up
+          stack-name: eq-prod
+          work-dir: infra
+        env:
+          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}

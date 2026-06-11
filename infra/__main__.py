@@ -1,18 +1,37 @@
 """Pulumi entry point for action-item-graph AWS infrastructure.
 
 Declares the EventBridge → SQS → Lambda forwarder stack that routes
-EnvelopeV1 events to the Railway API service.
+EnvelopeV1 events into the DBOS system database for the Railway service.
 
-Usage:
-    cd infra && pulumi up --stack prod
+Stacks:
+    prod     — ⚠️ historically named: owns the LIVE DEV chain (account
+               211125681610). Applied locally: cd infra && pulumi up --stack prod
+    eq-prod  — the isolated prod environment (account 009907129037), applied
+               via the keyless deploy-prod-infra workflow.
 """
 
 import pulumi
-
+import pulumi_aws as aws
 from forwarder import create_forwarder_stack
 
 # ── Stack Configuration ──
 config = pulumi.Config()
+
+# ── AWS account guard (fail-closed) ──
+# Each stack MUST declare which AWS account it may deploy into; refuse to run
+# against anything else. Prevents the cross-environment apply class of error
+# (this project has a dev-owning stack literally named "prod").
+expected_account_id = config.require("expected-account-id")
+_caller_account_id = aws.get_caller_identity().account_id
+if _caller_account_id != expected_account_id:
+    raise RuntimeError(
+        f"AWS account guard: credentials resolve to account {_caller_account_id} "
+        f"but stack '{pulumi.get_stack()}' expects {expected_account_id} — refusing to deploy."
+    )
+
+# Optional IAM permissions boundary for the Lambda execution role. The prod
+# account denies CreateRole without its eq-prod-service-boundary; dev sets none.
+permissions_boundary_arn = config.get("permissions-boundary-arn")
 
 # DBOS system database connection (direct, non-pooler) for DBOSClient.enqueue
 # from the Lambda. Must be set before `pulumi up`:
@@ -70,6 +89,9 @@ outputs = create_forwarder_stack(
     },
     rule_description="Routes transcript and email events to action-item-graph SQS queue",
     # Defaults match live config: 720s visibility, 3 max receives, 256MB, 120s timeout
+    permissions_boundary=permissions_boundary_arn,
+    # The handler emits partial_enqueue_pair_count under this namespace.
+    metrics_namespace="ActionItemGraph/Lambda",
 )
 
 # ── Stack Exports ──
