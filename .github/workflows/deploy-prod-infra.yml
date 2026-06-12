@@ -53,18 +53,25 @@ jobs:
       - name: Package Lambda
         run: bash scripts/package_lambda.sh
 
+      # ⚠️ Install with the venv's own interpreter (`./venv/bin/python -m pip`),
+      # NOT `source venv/bin/activate; pip` — if the runner's venv lands without
+      # a pip binary, the activate-style install silently falls back to the
+      # system pip, and pulumi/actions@v7's language host (which runs the
+      # program with venv/bin/python per Pulumi.yaml `virtualenv: venv`) finds
+      # no modules (`ModuleNotFoundError: pulumi`, run 27369955975). This is
+      # graph-core's proven-green block.
       - name: Install Pulumi dependencies
         working-directory: infra
         run: |
           python -m venv venv
-          source venv/bin/activate
-          pip install -r requirements.txt
+          ./venv/bin/python -m pip install --upgrade pip
+          ./venv/bin/python -m pip install -r requirements.txt
 
       - name: Deploy with Pulumi
         uses: pulumi/actions@v7
         with:
           command: up
-          stack-name: eq-prod
+          stack-name: oneilstokeseqrm/action-item-graph-infra/eq-prod
           work-dir: infra
         env:
           PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}

@@ -1,2 +1,4 @@
 pulumi>=3.100.0
-pulumi-aws>=6.0.0
+# Pinned to the exact provider version the prod stack is previewed/applied with, so a
+# keyless CI run never resolves a newer major than what was reviewed (mirrors EQ-120/EQ-121/EQ-122 Phase B).
+pulumi-aws==7.32.0

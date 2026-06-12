@@ -215,7 +215,7 @@ def create_forwarder_stack(
     # ── 8. IAM Inline Policy ──
     def _build_policy(args: list) -> str:
         queue_arn_val = args[0]
-        log_group = f"arn:aws:logs:{region.name}:{caller.account_id}:log-group:/aws/lambda/{service_name}-ingest:*"
+        log_group = f"arn:aws:logs:{region.region}:{caller.account_id}:log-group:/aws/lambda/{service_name}-ingest:*"
 
         statements = [
             {
