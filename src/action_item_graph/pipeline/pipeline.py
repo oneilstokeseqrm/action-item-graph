@@ -1168,7 +1168,7 @@ class ActionItemPipeline:
                             priority_scores, action_item_summaries, envelope_metadata,
                             status, dedup_key, created_at
                         ) VALUES (
-                            gen_random_uuid(), :tenant_id, :account_id::uuid, :interaction_id::uuid,
+                            gen_random_uuid(), :tenant_id, CAST(:account_id AS uuid), CAST(:interaction_id AS uuid),
                             'action_item', :created_ids, :updated_ids,
                             :priority_scores, :summaries, :envelope_metadata,
                             'pending', :dedup_key, now()
