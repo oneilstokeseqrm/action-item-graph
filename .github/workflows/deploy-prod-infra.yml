@@ -73,5 +73,11 @@ jobs:
           command: up
           stack-name: oneilstokeseqrm/action-item-graph-infra/eq-prod
           work-dir: infra
+          # Pin the CLI: with no version configured the action uses the runner
+          # image's preinstalled pulumi, and v3.245.0 ignores Pulumi.yaml's
+          # `virtualenv: venv` (ModuleNotFoundError: pulumi — run 27410628935).
+          # 3.243.0 = the program's last proven-green CI apply (graph-core,
+          # run 27293339164). Bump deliberately once upstream fixes 3.245+.
+          pulumi-version: '3.243.0'
         env:
           PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
