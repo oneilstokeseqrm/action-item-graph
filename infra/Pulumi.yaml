@@ -2,5 +2,12 @@ name: action-item-graph-infra
 runtime:
   name: python
   options:
+    # Explicit toolchain: newer pulumi CLIs auto-detect the repo-root uv
+    # project (uv.lock/pyproject.toml) and silently override `virtualenv`,
+    # running the program in the app's uv env which has no pulumi SDK
+    # (ModuleNotFoundError — runs 27410628935/27411243007; root-caused +
+    # fix validated on the runner via the diag probe runs 27411556975/
+    # 27411684838). pip + venv is what local applies use too.
+    toolchain: pip
     virtualenv: venv
 description: AWS infrastructure for the action-item-graph event ingestion pipeline (EventBridge → SQS → Lambda forwarder → Railway)
